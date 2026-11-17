@@ -258,8 +258,9 @@ class PdfManipulationEngine(private val context: Context) {
                   val bottom = mediaBox.upperRightY - max(action.topNorm, action.bottomNorm) * pageH
                   val boxW = (right - left).coerceAtLeast(12f)
                   val boxH = (top - bottom).coerceAtLeast(12f)
-                  // Opaque white cover for redaction with 2pt padding so stray edges are cleanly hidden
-                  cs.setNonStrokingColor(255, 255, 255)
+                  // Opaque cover matching sampled background color with 2pt padding so old text edges are cleanly hidden
+                  val (bgR, bgG, bgB) = rgbComponents(action.backgroundArgb)
+                  cs.setNonStrokingColor(bgR, bgG, bgB)
                   cs.addRect(left - 2f, bottom - 2f, boxW + 4f, boxH + 4f)
                   cs.fill()
                   if (action.replacementText.isNotBlank()) {

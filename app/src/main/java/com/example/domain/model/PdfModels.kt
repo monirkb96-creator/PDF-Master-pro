@@ -88,6 +88,7 @@ sealed interface PdfEditAction {
     val fontSizeSp: Float,
     val textColorArgb: Int,
     val font: EditorFont = EditorFont.HELVETICA,
+    val backgroundArgb: Int = android.graphics.Color.WHITE,
   ) : PdfEditAction
 
   data class AddImage(

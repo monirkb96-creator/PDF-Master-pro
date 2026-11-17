@@ -259,6 +259,7 @@ class PdfEngineRobolectricTest {
       fontSizeSp = first.fontSizePt,
       textColorArgb = Color.BLACK,
       font = EditorFont.HELVETICA,
+      backgroundArgb = Color.rgb(245, 240, 225),
     )
     assertTrue(pdfEngine.applyEdits(src, out, listOf(replaceAction)).isSuccess)
     val extracted = pdfEngine.extractTextByPage(out).first()

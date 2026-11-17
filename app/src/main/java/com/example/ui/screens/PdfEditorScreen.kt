@@ -48,6 +48,7 @@ import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Category
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.HideSource
@@ -123,6 +124,7 @@ import com.example.data.local.PdfDocumentEntity
 import com.example.domain.model.EditorFont
 import com.example.domain.model.EditorTool
 import com.example.domain.model.HeaderFooterConfig
+import com.example.domain.model.OcrLanguageChoice
 import com.example.domain.model.PdfEditAction
 import com.example.domain.model.PdfTextBlock
 import com.example.domain.model.ShapeKind
@@ -134,6 +136,7 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private data class InlineEditSession(
@@ -148,6 +151,7 @@ private data class InlineEditSession(
   val fontSizeSp: Float,
   val font: EditorFont,
   val color: Color,
+  val backgroundColor: Color = Color.White,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -178,8 +182,11 @@ fun PdfEditorScreen(
   var headerFooter by remember { mutableStateOf(HeaderFooterConfig()) }
   var showHeaderFooterDialog by remember { mutableStateOf(false) }
 
-  // Detected selectable text blocks on the current page
+  // Detected selectable text blocks on the current page (vector PDF text or OCR on image PDFs)
   var pageTextBlocks by remember { mutableStateOf<List<PdfTextBlock>>(emptyList()) }
+  var isScanningImageText by remember { mutableStateOf(false) }
+  var editorOcrLang by remember { mutableStateOf(OcrLanguageChoice.ENGLISH) }
+  var currentRenderedBmp by remember { mutableStateOf<Bitmap?>(null) }
 
   // Active inline live cursor editor directly on the PDF page
   var inlineEdit by remember { mutableStateOf<InlineEditSession?>(null) }
@@ -211,16 +218,28 @@ fun PdfEditorScreen(
     }
   }
 
-  LaunchedEffect(doc?.filePath, currentPage, refreshTick) {
+  LaunchedEffect(doc?.filePath, currentPage, refreshTick, currentRenderedBmp, editorOcrLang) {
     val path = doc?.filePath ?: return@LaunchedEffect
     val file = File(path)
-    if (file.exists()) {
-      pageTextBlocks = container.pdfEngine.extractPageTextBlocks(file, currentPage)
+    if (!file.exists()) return@LaunchedEffect
+    val vectorBlocks = container.pdfEngine.extractPageTextBlocks(file, currentPage)
+    if (vectorBlocks.isNotEmpty()) {
+      pageTextBlocks = vectorBlocks
+    } else {
+      val bmp = currentRenderedBmp
+      if (bmp != null) {
+        isScanningImageText = true
+        pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, editorOcrLang)
+        isScanningImageText = false
+      } else {
+        pageTextBlocks = emptyList()
+      }
     }
   }
 
   LaunchedEffect(inlineEdit?.sessionKey) {
     if (inlineEdit != null) {
+      delay(60)
       runCatching {
         inlineFocusRequester.requestFocus()
         keyboardController?.show()
@@ -253,6 +272,7 @@ fun PdfEditorScreen(
         fontSizeSp = session.fontSizeSp,
         textColorArgb = session.color.toArgb(),
         font = session.font,
+        backgroundArgb = session.backgroundColor.toArgb(),
       )
       if (existingIdx >= 0) {
         actions[existingIdx] = act
@@ -319,6 +339,7 @@ fun PdfEditorScreen(
         fontSizeSp = hitPending.fontSizeSp,
         font = hitPending.font,
         color = Color(hitPending.textColorArgb),
+        backgroundColor = Color(hitPending.backgroundArgb),
       )
       return
     }
@@ -341,7 +362,7 @@ fun PdfEditorScreen(
       return
     }
 
-    // 2. Check if user tapped an existing extracted text block from the PDF
+    // 2. Check if user tapped an existing extracted text block from the PDF (vector or OCR)
     if (preferExistingBlock) {
       val hitBlock = pageTextBlocks.firstOrNull { blk ->
         nx in (blk.leftNorm - 0.015f)..(blk.rightNorm + 0.02f) &&
@@ -349,6 +370,15 @@ fun PdfEditorScreen(
       }
       if (hitBlock != null) {
         val text = hitBlock.text
+        val sampledBg = sampleBoxBackgroundColor(
+          currentRenderedBmp,
+          hitBlock.leftNorm,
+          hitBlock.topNorm,
+          hitBlock.rightNorm,
+          hitBlock.bottomNorm,
+        )
+        val lum = (0.299f * sampledBg.red + 0.587f * sampledBg.green + 0.114f * sampledBg.blue)
+        val defaultInk = if (lum < 0.45f) Color.White else selectedColor
         inlineEdit = InlineEditSession(
           sessionKey = UUID.randomUUID().toString(),
           existingActionId = null,
@@ -360,7 +390,8 @@ fun PdfEditorScreen(
           value = TextFieldValue(text = text, selection = TextRange(text.length)),
           fontSizeSp = hitBlock.fontSizePt.coerceIn(10f, 36f),
           font = if (text.any { it.code > 126 }) EditorFont.BENGALI else selectedFont,
-          color = selectedColor,
+          color = defaultInk,
+          backgroundColor = sampledBg,
         )
         return
       }
@@ -645,20 +676,64 @@ fun PdfEditorScreen(
                 color = MaterialTheme.colorScheme.primary,
               )
             } else {
-              val helperText = when (activeTool) {
-                EditorTool.EDIT_TEXT -> if (pageTextBlocks.isNotEmpty()) strings.tapTextToEditHint else strings.noSelectableTextHint
-                EditorTool.REDACT -> strings.redactNotice
+              val helperText = when {
+                isScanningImageText -> strings.scanningPhotoTextHint
+                activeTool == EditorTool.EDIT_TEXT && pageTextBlocks.isNotEmpty() -> strings.tapTextToEditHint
+                activeTool == EditorTool.EDIT_TEXT -> strings.noSelectableTextHint
+                activeTool == EditorTool.REDACT -> strings.redactNotice
                 else -> strings.tapPageToPlace
               }
-              Text(
-                text = helperText,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (activeTool == EditorTool.EDIT_TEXT || activeTool == EditorTool.REDACT) {
-                  MaterialTheme.colorScheme.primary
-                } else {
-                  MaterialTheme.colorScheme.onSurfaceVariant
-                },
-              )
+              Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+              ) {
+                Text(
+                  text = helperText,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = if (activeTool == EditorTool.EDIT_TEXT || activeTool == EditorTool.REDACT) {
+                    MaterialTheme.colorScheme.primary
+                  } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                  },
+                  modifier = Modifier.weight(1f),
+                )
+                if (activeTool == EditorTool.EDIT_TEXT) {
+                  FilterChip(
+                    selected = editorOcrLang == OcrLanguageChoice.BANGLA,
+                    onClick = {
+                      val next = if (editorOcrLang == OcrLanguageChoice.ENGLISH) {
+                        if (container.ocrEngine.isLanguageReady(OcrLanguageChoice.BANGLA)) {
+                          OcrLanguageChoice.BANGLA
+                        } else {
+                          onNotify(strings.ocrModelMissingBn)
+                          OcrLanguageChoice.ENGLISH
+                        }
+                      } else {
+                        OcrLanguageChoice.ENGLISH
+                      }
+                      editorOcrLang = next
+                      currentRenderedBmp?.let { bmp ->
+                        scope.launch {
+                          isScanningImageText = true
+                          pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, next)
+                          isScanningImageText = false
+                        }
+                      }
+                    },
+                    label = {
+                      Text(
+                        if (editorOcrLang == OcrLanguageChoice.BANGLA) "OCR: বাংলা" else "OCR: EN",
+                        style = MaterialTheme.typography.labelSmall,
+                      )
+                    },
+                    leadingIcon = {
+                      Icon(Icons.Filled.DocumentScanner, contentDescription = null, modifier = Modifier.size(14.dp))
+                    },
+                    modifier = Modifier.padding(start = 6.dp),
+                  )
+                }
+              }
               Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -740,7 +815,9 @@ fun PdfEditorScreen(
 
           if (f != null && f.exists() && pageCount > 0) {
             val pageBmp by produceState<Bitmap?>(initialValue = null, f.absolutePath, currentPage, refreshTick) {
-              value = container.pdfRendererHelper.renderPage(f, currentPage, targetWidthPx = 1400)
+              val rendered = container.pdfRendererHelper.renderPage(f, currentPage, targetWidthPx = 1400)
+              currentRenderedBmp = rendered
+              value = rendered
             }
             val bmp = pageBmp
             if (bmp != null) {
@@ -965,7 +1042,7 @@ fun PdfEditorScreen(
                           val w = abs(act.rightNorm - act.leftNorm) * size.width
                           val h = abs(act.bottomNorm - act.topNorm) * size.height
                           drawRect(
-                            Color.White,
+                            Color(act.backgroundArgb),
                             topLeft = Offset(l - 2f, t - 2f),
                             size = Size(w.coerceAtLeast(18f) + 4f, h.coerceAtLeast(14f) + 4f),
                           )
@@ -1057,7 +1134,7 @@ fun PdfEditorScreen(
                         .offset { IntOffset(boxLeftPx, boxTopPx) }
                         .widthIn(min = minBoxWidthDp, max = (zoomedWidth - 8.dp).coerceAtLeast(120.dp))
                         .background(
-                          color = if (session.isReplaceBox) Color.White else Color.White.copy(alpha = 0.92f),
+                          color = if (session.isReplaceBox) session.backgroundColor else Color.White.copy(alpha = 0.92f),
                           shape = RoundedCornerShape(3.dp),
                         )
                         .border(1.5.dp, Color(0xFF155EEF), RoundedCornerShape(3.dp))
@@ -1075,6 +1152,7 @@ fun PdfEditorScreen(
                         ),
                         cursorBrush = SolidColor(Color(0xFF155EEF)),
                         modifier = Modifier
+                          .fillMaxWidth()
                           .focusRequester(inlineFocusRequester)
                           .testTag("editor_inline_text_input"),
                       )
@@ -1274,3 +1352,39 @@ private fun nudgeAction(action: PdfEditAction, dx: Float, dy: Float): PdfEditAct
     else -> action
   }
 }
+
+private fun sampleBoxBackgroundColor(
+  bmp: Bitmap?,
+  leftNorm: Float,
+  topNorm: Float,
+  rightNorm: Float,
+  bottomNorm: Float,
+): Color {
+  if (bmp == null || bmp.width <= 4 || bmp.height <= 4) return Color.White
+  val x0 = (leftNorm * bmp.width).toInt().coerceIn(2, bmp.width - 3)
+  val x1 = (rightNorm * bmp.width).toInt().coerceIn(x0 + 1, bmp.width - 2)
+  val y0 = (topNorm * bmp.height).toInt().coerceIn(2, bmp.height - 3)
+  val y1 = (bottomNorm * bmp.height).toInt().coerceIn(y0 + 1, bmp.height - 2)
+
+  val samples = mutableListOf<Int>()
+  val stepX = ((x1 - x0) / 4).coerceAtLeast(1)
+  for (x in x0..x1 step stepX) {
+    samples.add(bmp.getPixel(x, (y0 - 2).coerceAtLeast(0)))
+    samples.add(bmp.getPixel(x, (y1 + 2).coerceAtMost(bmp.height - 1)))
+  }
+  val midY = (y0 + y1) / 2
+  samples.add(bmp.getPixel((x0 - 2).coerceAtLeast(0), midY))
+  samples.add(bmp.getPixel((x1 + 2).coerceAtMost(bmp.width - 1), midY))
+
+  if (samples.isEmpty()) return Color.White
+  // Pick a bright representative perimeter pixel to avoid text ink bleeding into edges
+  val sorted = samples.sortedBy { px ->
+    val r = android.graphics.Color.red(px)
+    val g = android.graphics.Color.green(px)
+    val b = android.graphics.Color.blue(px)
+    0.299f * r + 0.587f * g + 0.114f * b
+  }
+  val chosen = sorted[(sorted.size * 3) / 4]
+  return Color(chosen)
+}
+

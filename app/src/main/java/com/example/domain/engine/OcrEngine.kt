@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import com.example.R
 import com.example.domain.model.OcrLanguageChoice
+import com.example.domain.model.PdfTextBlock
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -138,6 +139,113 @@ class OcrEngine(
       return recognizeWithTesseract(bitmap, language.code)
     }
     return recognizeWithMlKit(bitmap)
+  }
+
+  suspend fun detectPageTextBlocks(
+    bitmap: Bitmap,
+    pageIndex: Int,
+    language: OcrLanguageChoice = OcrLanguageChoice.ENGLISH,
+  ): List<PdfTextBlock> = withContext(Dispatchers.IO) {
+    runCatching {
+      if (language == OcrLanguageChoice.BANGLA && isTesseractModelAvailable(OcrLanguageChoice.BANGLA)) {
+        detectBlocksWithTesseract(bitmap, pageIndex, language.code)
+      } else {
+        detectBlocksWithMlKit(bitmap, pageIndex)
+      }
+    }.getOrDefault(emptyList())
+  }
+
+  private suspend fun detectBlocksWithMlKit(bitmap: Bitmap, pageIndex: Int): List<PdfTextBlock> =
+    suspendCancellableCoroutine { cont ->
+      val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+      val image = InputImage.fromBitmap(bitmap, 0)
+      val bw = bitmap.width.coerceAtLeast(1).toFloat()
+      val bh = bitmap.height.coerceAtLeast(1).toFloat()
+      recognizer.process(image)
+        .addOnSuccessListener { result ->
+          recognizer.close()
+          val blocks = mutableListOf<PdfTextBlock>()
+          var seq = 0
+          for (block in result.textBlocks) {
+            for (line in block.lines) {
+              val text = line.text.trim()
+              val rect = line.boundingBox ?: continue
+              if (text.isEmpty() || rect.width() <= 2 || rect.height() <= 2) continue
+              val leftNorm = (rect.left / bw).coerceIn(0f, 0.98f)
+              val topNorm = (rect.top / bh).coerceIn(0f, 0.98f)
+              val rightNorm = (rect.right / bw).coerceIn(leftNorm + 0.015f, 1f)
+              val bottomNorm = (rect.bottom / bh).coerceIn(topNorm + 0.01f, 1f)
+              val estFontPt = ((rect.height() / bh) * 792f * 0.78f).coerceIn(9f, 40f)
+              blocks.add(
+                PdfTextBlock(
+                  id = "ocr_${pageIndex}_${seq++}",
+                  pageIndex = pageIndex,
+                  text = text,
+                  leftNorm = leftNorm,
+                  topNorm = topNorm,
+                  rightNorm = rightNorm,
+                  bottomNorm = bottomNorm,
+                  fontSizePt = estFontPt,
+                )
+              )
+            }
+          }
+          cont.resume(blocks)
+        }
+        .addOnFailureListener { exc ->
+          recognizer.close()
+          cont.resumeWithException(exc)
+        }
+    }
+
+  private fun detectBlocksWithTesseract(
+    bitmap: Bitmap,
+    pageIndex: Int,
+    langCode: String,
+  ): List<PdfTextBlock> {
+    val tess = TessBaseAPI()
+    val bw = bitmap.width.coerceAtLeast(1).toFloat()
+    val bh = bitmap.height.coerceAtLeast(1).toFloat()
+    val blocks = mutableListOf<PdfTextBlock>()
+    try {
+      if (!tess.init(tessBasePath, langCode)) return emptyList()
+      tess.setImage(bitmap)
+      // Trigger layout & recognition pass
+      tess.utF8Text
+      val iter = tess.resultIterator ?: return emptyList()
+      try {
+        iter.begin()
+        var seq = 0
+        do {
+          val lineText = iter.getUTF8Text(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE)?.trim().orEmpty()
+          val rect = iter.getBoundingRect(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE)
+          if (lineText.isNotEmpty() && rect != null && rect.width() > 2 && rect.height() > 2) {
+            val leftNorm = (rect.left / bw).coerceIn(0f, 0.98f)
+            val topNorm = (rect.top / bh).coerceIn(0f, 0.98f)
+            val rightNorm = (rect.right / bw).coerceIn(leftNorm + 0.015f, 1f)
+            val bottomNorm = (rect.bottom / bh).coerceIn(topNorm + 0.01f, 1f)
+            val estFontPt = ((rect.height() / bh) * 792f * 0.78f).coerceIn(9f, 40f)
+            blocks.add(
+              PdfTextBlock(
+                id = "ocr_tess_${pageIndex}_${seq++}",
+                pageIndex = pageIndex,
+                text = lineText,
+                leftNorm = leftNorm,
+                topNorm = topNorm,
+                rightNorm = rightNorm,
+                bottomNorm = bottomNorm,
+                fontSizePt = estFontPt,
+              )
+            )
+          }
+        } while (iter.next(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE))
+      } finally {
+        runCatching { iter.delete() }
+      }
+      return blocks
+    } finally {
+      runCatching { tess.recycle() }
+    }
   }
 
   private suspend fun recognizeWithMlKit(bitmap: Bitmap): String =
