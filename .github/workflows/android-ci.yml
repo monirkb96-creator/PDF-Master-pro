@@ -87,12 +87,19 @@ jobs:
           -Dorg.gradle.workers.max=2
           --no-configuration-cache --console=plain
 
-      - name: Upload Debug APK artifact
+      - name: Prepare PDF-Master-Pro.apk
+        if: success()
+        run: |
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            cp app/build/outputs/apk/debug/app-debug.apk app/build/outputs/apk/debug/PDF-Master-Pro.apk
+          fi
+
+      - name: Upload PDF-Master-Pro.apk artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: PDF-Master-Pro-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: PDF-Master-Pro-apk
+          path: app/build/outputs/apk/debug/PDF-Master-Pro.apk
           if-no-files-found: ignore
 
       - name: Run Unit & Robolectric Tests
@@ -107,8 +114,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: PDF Master Pro (Latest Debug APK)
-          body: Automated debug APK build for PDF Master Pro.
-          files: app/build/outputs/apk/debug/app-debug.apk
+          name: PDF Master Pro (Latest APK)
+          body: Automated Android APK build for PDF Master Pro.
+          files: app/build/outputs/apk/debug/PDF-Master-Pro.apk
           prerelease: false
           make_latest: true

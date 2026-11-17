@@ -17,6 +17,7 @@ import com.example.domain.model.HeaderFooterConfig
 import com.example.domain.model.OrganizerPageItem
 import com.example.domain.model.PdfDocInfo
 import com.example.domain.model.PdfEditAction
+import com.example.domain.model.PdfTextBlock
 import com.example.domain.model.ShapeKind
 import com.example.domain.model.SplitMode
 import com.example.domain.model.WatermarkPosition
@@ -38,9 +39,11 @@ import com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject
 import com.tom_roush.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState
 import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationText
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import com.tom_roush.pdfbox.text.TextPosition
 import com.tom_roush.pdfbox.util.Matrix
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.max
@@ -103,6 +106,90 @@ class PdfManipulationEngine(private val context: Context) {
       }
     }.getOrDefault(emptyList())
   }
+
+  suspend fun extractPageTextBlocks(file: File, pageIndex: Int): List<PdfTextBlock> =
+    withContext(Dispatchers.IO) {
+      runCatching {
+        PDDocument.load(file).use { doc ->
+          if (pageIndex !in 0 until doc.numberOfPages) return@use emptyList()
+          val blocks = mutableListOf<PdfTextBlock>()
+          var seq = 0
+          val stripper = object : PDFTextStripper() {
+            override fun writeString(text: String?, textPositions: MutableList<TextPosition>?) {
+              if (text.isNullOrBlank() || textPositions.isNullOrEmpty()) return
+              val groups = mutableListOf<MutableList<TextPosition>>()
+              var current = mutableListOf<TextPosition>()
+              for (tp in textPositions) {
+                if (current.isEmpty()) {
+                  current.add(tp)
+                } else {
+                  val prev = current.last()
+                  val prevFont = prev.fontSizeInPt.coerceAtLeast(8f)
+                  val gapX = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                  val diffY = abs(tp.yDirAdj - prev.yDirAdj)
+                  if (diffY > 4.5f || gapX > max(14f, prevFont * 2.2f)) {
+                    groups.add(current)
+                    current = mutableListOf(tp)
+                  } else {
+                    current.add(tp)
+                  }
+                }
+              }
+              if (current.isNotEmpty()) groups.add(current)
+
+              for (grp in groups) {
+                val sb = StringBuilder()
+                for (idx in grp.indices) {
+                  val tp = grp[idx]
+                  if (idx > 0) {
+                    val prev = grp[idx - 1]
+                    val gap = tp.xDirAdj - (prev.xDirAdj + prev.widthDirAdj)
+                    val spaceThreshold = (prev.fontSizeInPt.coerceAtLeast(8f)) * 0.22f
+                    if (gap > spaceThreshold && !sb.endsWith(" ") && !tp.unicode.startsWith(" ")) {
+                      sb.append(' ')
+                    }
+                  }
+                  sb.append(tp.unicode)
+                }
+                val blockText = sb.toString().trim()
+                if (blockText.isEmpty()) continue
+                val pageW = grp.first().pageWidth.coerceAtLeast(1f)
+                val pageH = grp.first().pageHeight.coerceAtLeast(1f)
+                val minX = grp.minOf { it.xDirAdj }
+                val maxX = grp.maxOf { it.xDirAdj + it.widthDirAdj }
+                val baselineY = grp.map { it.yDirAdj }.average().toFloat()
+                val fontSize = grp.map { it.fontSizeInPt }.filter { it > 0f }.average().toFloat()
+                  .takeIf { !it.isNaN() } ?: 12f
+                val maxGlyphH = grp.maxOf { it.heightDir.coerceAtLeast(fontSize * 0.72f) }
+
+                val topNorm = ((baselineY - maxGlyphH * 1.08f) / pageH).coerceIn(0f, 0.985f)
+                val bottomNorm = ((baselineY + fontSize * 0.28f) / pageH).coerceIn(topNorm + 0.01f, 1f)
+                val leftNorm = (minX / pageW).coerceIn(0f, 0.98f)
+                val rightNorm = (maxX / pageW).coerceIn(leftNorm + 0.015f, 1f)
+
+                blocks.add(
+                  PdfTextBlock(
+                    id = "blk_${pageIndex}_${seq++}",
+                    pageIndex = pageIndex,
+                    text = blockText,
+                    leftNorm = leftNorm,
+                    topNorm = topNorm,
+                    rightNorm = rightNorm,
+                    bottomNorm = bottomNorm,
+                    fontSizePt = fontSize.coerceIn(7f, 48f),
+                  )
+                )
+              }
+            }
+          }
+          stripper.sortByPosition = true
+          stripper.startPage = pageIndex + 1
+          stripper.endPage = pageIndex + 1
+          stripper.getText(doc)
+          blocks
+        }
+      }.getOrDefault(emptyList())
+    }
 
   suspend fun applyEdits(
     sourceFile: File,
@@ -171,20 +258,21 @@ class PdfManipulationEngine(private val context: Context) {
                   val bottom = mediaBox.upperRightY - max(action.topNorm, action.bottomNorm) * pageH
                   val boxW = (right - left).coerceAtLeast(12f)
                   val boxH = (top - bottom).coerceAtLeast(12f)
-                  // Opaque white cover for redaction
+                  // Opaque white cover for redaction with 2pt padding so stray edges are cleanly hidden
                   cs.setNonStrokingColor(255, 255, 255)
-                  cs.addRect(left, bottom, boxW, boxH)
+                  cs.addRect(left - 2f, bottom - 2f, boxW + 4f, boxH + 4f)
                   cs.fill()
                   if (action.replacementText.isNotBlank()) {
+                    val baselineY = bottom + (boxH * 0.22f)
                     if (action.replacementText.any { it.code > 126 }) {
-                      drawShapedUnicodeText(doc, cs, action.replacementText, left + 3f, bottom + (boxH * 0.25f), action.fontSizeSp, action.textColorArgb)
+                      drawShapedUnicodeText(doc, cs, action.replacementText, left, baselineY, action.fontSizeSp, action.textColorArgb)
                     } else {
                       val pdfFont = loadFont(action.font)
                       val (r, g, b) = rgbComponents(action.textColorArgb)
                       cs.beginText()
                       cs.setFont(pdfFont, action.fontSizeSp)
                       cs.setNonStrokingColor(r, g, b)
-                      cs.newLineAtOffset(left + 3f, bottom + (boxH * 0.25f))
+                      cs.newLineAtOffset(left, baselineY)
                       cs.showText(safePdfText(action.replacementText, pdfFont))
                       cs.endText()
                     }
@@ -899,7 +987,7 @@ class PdfManipulationEngine(private val context: Context) {
     val canvas = Canvas(bmp)
     canvas.drawText(text, 4f, -fm.ascent + 4f, paint)
     val pdImg = LosslessFactory.createFromImage(doc, bmp)
-    cs.drawImage(pdImg, pdfX, pdfY - 4f / scale, bmpW / scale, bmpH / scale)
+    cs.drawImage(pdImg, pdfX, pdfY - (fm.descent + 4f) / scale, bmpW / scale, bmpH / scale)
     bmp.recycle()
   }
 

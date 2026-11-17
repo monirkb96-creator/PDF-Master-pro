@@ -232,5 +232,36 @@ class PdfEngineRobolectricTest {
     assertEquals("PDF Master Pro", StringsBn.appName)
     assertTrue(StringsBn.navHome.isNotBlank())
     assertTrue(StringsBn.toolEditPdf.isNotBlank())
+    assertTrue(StringsBn.editorToolEditText.isNotBlank())
+  }
+
+  @Test
+  fun `extract page text blocks detects coordinates for inline editing`() = runBlocking {
+    val src = createSamplePdf("inline_src.pdf", pages = 1, textPrefix = "Contract Amount")
+    val blocks = pdfEngine.extractPageTextBlocks(src, 0)
+    assertTrue("Expected at least 1 text block", blocks.isNotEmpty())
+    val first = blocks.first()
+    assertTrue(first.text.contains("Contract Amount"))
+    assertTrue(first.leftNorm in 0f..1f)
+    assertTrue(first.topNorm in 0f..1f)
+    assertTrue(first.rightNorm > first.leftNorm)
+    assertTrue(first.bottomNorm > first.topNorm)
+
+    val out = tempFolder.newFile("inline_edited.pdf")
+    val replaceAction = PdfEditAction.RedactAndReplace(
+      id = "r1",
+      pageIndex = 0,
+      leftNorm = first.leftNorm,
+      topNorm = first.topNorm,
+      rightNorm = first.rightNorm,
+      bottomNorm = first.bottomNorm,
+      replacementText = "Updated Total 5000",
+      fontSizeSp = first.fontSizePt,
+      textColorArgb = Color.BLACK,
+      font = EditorFont.HELVETICA,
+    )
+    assertTrue(pdfEngine.applyEdits(src, out, listOf(replaceAction)).isSuccess)
+    val extracted = pdfEngine.extractTextByPage(out).first()
+    assertTrue(extracted.contains("Updated Total 5000"))
   }
 }

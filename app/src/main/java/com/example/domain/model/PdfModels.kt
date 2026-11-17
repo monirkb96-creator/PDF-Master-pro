@@ -4,8 +4,9 @@ import androidx.compose.ui.geometry.Offset
 import com.example.core.i18n.ExportQuality
 
 enum class EditorTool {
-  SELECT,
+  EDIT_TEXT,
   TEXT,
+  SELECT,
   REDACT,
   IMAGE,
   SHAPE,
@@ -201,4 +202,15 @@ data class ScannedPageItem(
   val cropTop: Float = 0f,
   val cropRight: Float = 1f,
   val cropBottom: Float = 1f,
+)
+
+data class PdfTextBlock(
+  val id: String,
+  val pageIndex: Int,
+  val text: String,
+  val leftNorm: Float,
+  val topNorm: Float,
+  val rightNorm: Float,
+  val bottomNorm: Float,
+  val fontSizePt: Float,
 )
