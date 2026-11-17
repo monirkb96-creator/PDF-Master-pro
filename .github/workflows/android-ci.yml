@@ -7,10 +7,15 @@ on:
     branches: [ "**" ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Build & Test Debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -29,8 +34,16 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
           SDK_MGR="$(command -v sdkmanager || find "$SDK_DIR" -name sdkmanager -type f 2>/dev/null | head -n 1)"
           if [ -n "$SDK_MGR" ]; then
-            yes | "$SDK_MGR" --licenses > /dev/null 2>&1 || true
+            timeout 45 bash -c "yes | \"$SDK_MGR\" --licenses > /dev/null 2>&1" || true
           fi
+
+      - name: Cache Robolectric & Maven artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: m2-robolectric-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            m2-robolectric-
 
       - name: Decode debug keystore
         run: |
@@ -43,11 +56,12 @@ jobs:
         with:
           gradle-version: "9.3.1"
 
-      - name: Run unit and Robolectric tests
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
-
-      - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Build Debug APK & Run Tests
+        run: >
+          gradle :app:assembleDebug :app:testDebugUnitTest
+          -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
+          -Dorg.gradle.workers.max=2
+          --console=plain --stacktrace
 
       - name: Upload Debug APK artifact
         uses: actions/upload-artifact@v4
