@@ -7,6 +7,9 @@ on:
     branches: [ "**" ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -34,17 +37,18 @@ jobs:
             SDK_DIR="$HOME/android-sdk"
             mkdir -p "$SDK_DIR"
           fi
-          sudo chown -R "$(id -u):$(id -g)" "$SDK_DIR" || true
+          sudo mkdir -p "$SDK_DIR/licenses" "$SDK_DIR/platforms" "$SDK_DIR/build-tools" || true
+          sudo chown -R "$(id -u):$(id -g)" "$SDK_DIR/licenses" "$SDK_DIR/platforms" "$SDK_DIR/build-tools" || true
           echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
 
-          mkdir -p "$SDK_DIR/licenses"
           printf "\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n" > "$SDK_DIR/licenses/android-sdk-license"
           printf "\n84831b9409646a918e30573bab4c9c91346d8abd\n" > "$SDK_DIR/licenses/android-sdk-preview-license"
           printf "\n33b6a2b64607f11b759f320ef9dff4ae5c47d97a\n" > "$SDK_DIR/licenses/google-gdk-license"
 
           SDK_MGR="$(command -v sdkmanager || find "$SDK_DIR" -name sdkmanager -type f 2>/dev/null | head -n 1)"
           if [ -n "$SDK_MGR" ]; then
+            timeout 45 bash -c "yes | \"$SDK_MGR\" --sdk_root=\"$SDK_DIR\" --licenses > /dev/null 2>&1" || true
             if [ ! -d "$SDK_DIR/platforms/android-36.1" ]; then
               yes | "$SDK_MGR" --sdk_root="$SDK_DIR" "platforms;android-36.1" "build-tools;36.0.0" || true
             fi
@@ -74,14 +78,14 @@ jobs:
           gradle :app:assembleDebug
           -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
           -Dorg.gradle.workers.max=2
-          --console=plain --stacktrace
+          --no-configuration-cache --console=plain --stacktrace
 
       - name: Upload Debug APK artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PDF-Master-Pro-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: ignore
 
       - name: Run Unit & Robolectric Tests
@@ -89,4 +93,15 @@ jobs:
           gradle :app:testDebugUnitTest
           -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
           -Dorg.gradle.workers.max=2
-          --console=plain --stacktrace
+          --no-configuration-cache --console=plain --stacktrace
+
+      - name: Publish APK to GitHub Release (latest)
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: PDF Master Pro (Latest Debug APK)
+          body: Automated debug APK build for PDF Master Pro.
+          files: app/build/outputs/apk/debug/app-debug.apk
+          prerelease: false
+          make_latest: true
