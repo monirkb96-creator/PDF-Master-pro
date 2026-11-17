@@ -62,10 +62,17 @@ jobs:
           restore-keys: |
             m2-robolectric-
 
-      - name: Decode debug keystore
+      - name: Decode or generate debug keystore
         run: |
-          if [ -f debug.keystore.base64 ] && [ ! -f debug.keystore ]; then
-            base64 -d debug.keystore.base64 > debug.keystore
+          if [ ! -f debug.keystore ]; then
+            if [ -f debug.keystore.base64 ]; then
+              base64 -d debug.keystore.base64 > debug.keystore
+            else
+              keytool -genkeypair -v -keystore debug.keystore \
+                -storepass android -alias androiddebugkey -keypass android \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
           fi
 
       - name: Set up Gradle 9.3.1
@@ -78,14 +85,14 @@ jobs:
           gradle :app:assembleDebug
           -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
           -Dorg.gradle.workers.max=2
-          --no-configuration-cache --console=plain --stacktrace
+          --no-configuration-cache --console=plain
 
       - name: Upload Debug APK artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: PDF-Master-Pro-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: ignore
 
       - name: Run Unit & Robolectric Tests
@@ -93,7 +100,7 @@ jobs:
           gradle :app:testDebugUnitTest
           -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
           -Dorg.gradle.workers.max=2
-          --no-configuration-cache --console=plain --stacktrace
+          --no-configuration-cache --console=plain
 
       - name: Publish APK to GitHub Release (latest)
         if: github.event_name != 'pull_request'
