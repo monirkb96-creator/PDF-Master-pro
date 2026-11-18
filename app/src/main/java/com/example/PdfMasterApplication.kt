@@ -15,7 +15,7 @@ class AppContainer(application: Application) {
   private val database = AppDatabase.build(application)
   val preferencesRepository = PreferencesRepository(application)
   val documentRepository = DocumentRepository(application, database.pdfDocumentDao())
-  val pdfRendererHelper = PdfRendererHelper(documentRepository.unlockedCacheDir)
+  var pdfRendererHelper = PdfRendererHelper(documentRepository.unlockedCacheDir)
   val pdfEngine = PdfManipulationEngine(application)
   val docxEngine = DocxEngine(application)
   val scannerEngine = ScannerEngine()

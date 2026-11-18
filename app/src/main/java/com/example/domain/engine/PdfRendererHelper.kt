@@ -12,10 +12,10 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-class PdfRendererHelper(private val unlockedCacheDir: File) {
+open class PdfRendererHelper(private val unlockedCacheDir: File) {
   private val renderMutex = Mutex()
 
-  suspend fun getPageCount(file: File): Int = withContext(Dispatchers.IO) {
+  open suspend fun getPageCount(file: File): Int = withContext(Dispatchers.IO) {
     renderMutex.withLock {
       ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
         PdfRenderer(pfd).use { renderer -> renderer.pageCount }
@@ -23,7 +23,7 @@ class PdfRendererHelper(private val unlockedCacheDir: File) {
     }
   }
 
-  suspend fun renderPage(
+  open suspend fun renderPage(
     file: File,
     pageIndex: Int,
     targetWidthPx: Int = 1200,
