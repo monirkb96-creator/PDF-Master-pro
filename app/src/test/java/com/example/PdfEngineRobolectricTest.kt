@@ -452,4 +452,90 @@ class PdfEngineRobolectricTest {
     assertTrue(res.exceptionOrNull()?.stackTraceToString() ?: "failed", res.isSuccess)
     assertTrue(out.exists() && out.length() > 0L)
   }
+
+  @Test
+  fun `detects Times-Bold metadata, real page size, and styled bold italic replacement`() = runBlocking {
+    val src = tempFolder.newFile("styled_serif.pdf")
+    PDDocument().use { doc ->
+      val page = PDPage(PDRectangle(800f, 1100f))
+      doc.addPage(page)
+      PDPageContentStream(doc, page).use { cs ->
+        cs.beginText()
+        cs.setFont(PDType1Font.TIMES_BOLD, 15f)
+        cs.newLineAtOffset(80f, 900f)
+        cs.showText("Certificate Heading")
+        cs.endText()
+      }
+      doc.save(src)
+    }
+
+    val (wPt, hPt) = pdfEngine.getPageSizePt(src, 0)
+    assertEquals(800f, wPt, 0.5f)
+    assertEquals(1100f, hPt, 0.5f)
+
+    val blocks = pdfEngine.extractPageTextBlocks(src, 0)
+    assertTrue(blocks.isNotEmpty())
+    val blk = blocks.first()
+    assertEquals(EditorFont.TIMES, blk.fontFamily)
+    assertTrue("Expected TIMES_BOLD to be detected as bold", blk.isBold)
+    assertEquals(15f, blk.fontSizePt, 1.5f)
+
+    val out = tempFolder.newFile("styled_serif_out.pdf")
+    val edit = PdfEditAction.RedactAndReplace(
+      id = "r_styled",
+      pageIndex = 0,
+      leftNorm = blk.leftNorm,
+      topNorm = blk.topNorm,
+      rightNorm = blk.rightNorm,
+      bottomNorm = blk.bottomNorm,
+      replacementText = "Updated Certificate",
+      fontSizeSp = blk.fontSizePt,
+      textColorArgb = Color.BLACK,
+      font = blk.fontFamily,
+      isBold = true,
+      isItalic = true,
+      preserveBackground = true,
+    )
+    assertTrue(pdfEngine.applyEdits(src, out, listOf(edit)).isSuccess)
+    assertTrue(pdfEngine.extractTextByPage(out).first().contains("Updated Certificate"))
+  }
+
+  @Test
+  fun `clean background patch ignores adjacent dark borders in outer ring without smudging`() {
+    val bmp = Bitmap.createBitmap(240, 120, Bitmap.Config.ARGB_8888)
+    bmp.eraseColor(Color.WHITE)
+    val darkInk = Color.rgb(12, 12, 12)
+    // Neighbor dark line just 2px above the target box (inside outer ring)
+    for (x in 50..190) {
+      for (y in 36..38) {
+        bmp.setPixel(x, y, darkInk)
+      }
+    }
+    // Target text inside the box
+    for (x in 70..160) {
+      for (y in 50..58) {
+        bmp.setPixel(x, y, darkInk)
+      }
+    }
+
+    val patch = BitmapPatchUtils.createCleanBackgroundPatch(
+      pageBmp = bmp,
+      leftNorm = 68f / 240f,
+      topNorm = 48f / 120f,
+      rightNorm = 162f / 240f,
+      bottomNorm = 60f / 120f,
+    )
+    assertTrue(patch != null)
+    val pb = patch!!.bitmap
+    // Verify the interior and edge of the patch remain crisp white with zero dark smudge streak
+    for (y in 2 until pb.height - 2) {
+      val px = pb.getPixel(pb.width / 2, y)
+      assertTrue(
+        "Expected clean white patch without ring-ink smudge at y=$y, got rgb(${Color.red(px)},${Color.green(px)},${Color.blue(px)})",
+        Color.red(px) > 225 && Color.green(px) > 225 && Color.blue(px) > 225,
+      )
+    }
+    pb.recycle()
+    bmp.recycle()
+  }
 }

@@ -11,6 +11,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
@@ -46,6 +50,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.BorderColor
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Category
@@ -104,12 +109,14 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -120,14 +127,19 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.AppContainer
+import com.example.R
 import com.example.core.i18n.LocalStrings
 import com.example.core.util.BitmapPatchUtils
 import com.example.core.util.FileUtils
@@ -163,6 +175,8 @@ private data class InlineEditSession(
   val font: EditorFont,
   val color: Color,
   val backgroundColor: Color = Color.White,
+  val isBold: Boolean = false,
+  val isItalic: Boolean = false,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -189,14 +203,27 @@ fun PdfEditorScreen(
   var currentPage by remember { mutableIntStateOf(0) }
   var activeTool by remember { mutableStateOf(EditorTool.EDIT_TEXT) }
   var selectedFont by remember { mutableStateOf(EditorFont.HELVETICA) }
-  var selectedFontSize by remember { mutableFloatStateOf(12f) }
+  var selectedFontSize by remember { mutableFloatStateOf(11f) }
+  var selectedBold by remember { mutableStateOf(false) }
+  var selectedItalic by remember { mutableStateOf(false) }
+  var showFontMenu by remember { mutableStateOf(false) }
   var selectedColor by remember { mutableStateOf(Color(0xFF0F172A)) }
   var selectedShape by remember { mutableStateOf(ShapeKind.RECTANGLE) }
   var strokeWidth by remember { mutableFloatStateOf(3f) }
   var editorZoom by remember { mutableFloatStateOf(1f) }
+  var pageSizePt by remember { mutableStateOf(595f to 842f) }
   var headerFooter by remember { mutableStateOf(HeaderFooterConfig()) }
   var showHeaderFooterDialog by remember { mutableStateOf(false) }
   var showSaveMenu by remember { mutableStateOf(false) }
+
+  val bengaliFontFamily = remember { FontFamily(Font(R.font.noto_sans_bengali)) }
+  fun composeFontFamily(font: EditorFont): FontFamily = when (font) {
+    EditorFont.HELVETICA -> FontFamily.SansSerif
+    EditorFont.TIMES -> FontFamily.Serif
+    EditorFont.COURIER -> FontFamily.Monospace
+    EditorFont.BENGALI -> bengaliFontFamily
+    EditorFont.BENGALI_SERIF -> FontFamily.Serif
+  }
 
   // Viewport and page layout sizes for exact keyboard-aware scrolling
   var viewportHeightPx by remember { mutableIntStateOf(0) }
@@ -244,6 +271,8 @@ fun PdfEditorScreen(
     val path = doc?.filePath ?: return@LaunchedEffect
     val file = File(path)
     if (!file.exists()) return@LaunchedEffect
+    val measuredSizePt = container.pdfEngine.getPageSizePt(file, currentPage)
+    pageSizePt = measuredSizePt
     val vectorBlocks = container.pdfEngine.extractPageTextBlocks(file, currentPage)
     pageTextBlocks = vectorBlocks
     val bmp = currentRenderedBmp
@@ -254,6 +283,7 @@ fun PdfEditorScreen(
         pageIndex = currentPage,
         language = editorOcrLang,
         existingVectorBlocks = vectorBlocks,
+        pageHeightPt = measuredSizePt.second,
       )
       isScanningImageText = false
     }
@@ -316,6 +346,8 @@ fun PdfEditorScreen(
         textColorArgb = session.color.toArgb(),
         font = session.font,
         backgroundArgb = session.backgroundColor.toArgb(),
+        isBold = session.isBold,
+        isItalic = session.isItalic,
       )
       if (existingIdx >= 0) {
         actions[existingIdx] = act
@@ -332,6 +364,8 @@ fun PdfEditorScreen(
         fontSizeSp = session.fontSizeSp,
         font = session.font,
         colorArgb = session.color.toArgb(),
+        isBold = session.isBold,
+        isItalic = session.isItalic,
       )
       if (existingIdx >= 0) {
         actions[existingIdx] = act
@@ -419,6 +453,8 @@ fun PdfEditorScreen(
         font = hitPending.font,
         color = Color(hitPending.textColorArgb),
         backgroundColor = Color(hitPending.backgroundArgb),
+        isBold = hitPending.isBold,
+        isItalic = hitPending.isItalic,
       )
       return
     }
@@ -437,6 +473,8 @@ fun PdfEditorScreen(
         fontSizeSp = hitPending.fontSizeSp,
         font = hitPending.font,
         color = Color(hitPending.colorArgb),
+        isBold = hitPending.isBold,
+        isItalic = hitPending.isItalic,
       )
       return
     }
@@ -458,7 +496,7 @@ fun PdfEditorScreen(
       val hitBlock = nearMatches.minWithOrNull(
         compareBy<PdfTextBlock> { distToRectSq(nx, ny, it.leftNorm, it.topNorm, it.rightNorm, it.bottomNorm) }
           .thenBy { (it.rightNorm - it.leftNorm) * (it.bottomNorm - it.topNorm) }
-      ) ?: BitmapPatchUtils.detectInkPhraseAt(currentRenderedBmp, nx, ny, currentPage)
+      ) ?: BitmapPatchUtils.detectInkPhraseAt(currentRenderedBmp, nx, ny, currentPage, pageSizePt.second)
 
       if (hitBlock != null) {
         val text = hitBlock.text
@@ -471,6 +509,17 @@ fun PdfEditorScreen(
         )
         val lum = (0.299f * sampledBg.red + 0.587f * sampledBg.green + 0.114f * sampledBg.blue)
         val defaultInk = if (lum < 0.45f) Color.White else selectedColor
+        val detectedFont = when {
+          text.isEmpty() || text.any { it.code > 126 } -> {
+            if (hitBlock.fontFamily == EditorFont.TIMES || hitBlock.fontFamily == EditorFont.BENGALI_SERIF) {
+              EditorFont.BENGALI_SERIF
+            } else {
+              EditorFont.BENGALI
+            }
+          }
+          else -> hitBlock.fontFamily
+        }
+        val snappedPt = ((hitBlock.fontSizePt * 2f).roundToInt() / 2f).coerceIn(7f, 36f)
         inlineEdit = InlineEditSession(
           sessionKey = UUID.randomUUID().toString(),
           existingActionId = null,
@@ -480,10 +529,12 @@ fun PdfEditorScreen(
           rightNorm = hitBlock.rightNorm,
           bottomNorm = hitBlock.bottomNorm,
           value = TextFieldValue(text = text, selection = TextRange(text.length)),
-          fontSizeSp = hitBlock.fontSizePt.coerceIn(9f, 36f),
-          font = if (text.isEmpty() || text.any { it.code > 126 }) EditorFont.BENGALI else selectedFont,
+          fontSizeSp = snappedPt,
+          font = detectedFont,
           color = defaultInk,
           backgroundColor = sampledBg,
+          isBold = hitBlock.isBold,
+          isItalic = hitBlock.isItalic,
         )
         return
       }
@@ -504,6 +555,8 @@ fun PdfEditorScreen(
       fontSizeSp = selectedFontSize,
       font = selectedFont,
       color = selectedColor,
+      isBold = selectedBold,
+      isItalic = selectedItalic,
     )
   }
 
@@ -758,7 +811,8 @@ fun PdfEditorScreen(
             if (bmp != null) {
               val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1)
               val zoomedWidth = (viewportWidth * editorZoom).coerceAtLeast(240.dp)
-              val fontScale = (zoomedWidth.value / 595f).coerceIn(0.42f, 3.0f)
+              val ptToDp = (zoomedWidth.value / pageSizePt.first.coerceAtLeast(100f)).coerceIn(0.25f, 4.0f)
+              fun pdfPtToSp(pt: Float): TextUnit = with(density) { (pt * ptToDp).dp.toSp() }
               val textMeasurer = rememberTextMeasurer()
               val bgPatchCache = remember(bmp) { mutableMapOf<String, BitmapPatchUtils.PatchResult?>() }
               DisposableEffect(bmp) {
@@ -819,6 +873,35 @@ fun PdfEditorScreen(
               Box(
                 modifier = Modifier
                   .fillMaxSize()
+                  .pointerInput(currentPage) {
+                    awaitEachGesture {
+                      var wasPinching = false
+                      while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pressed = event.changes.count { it.pressed }
+                        if (pressed >= 2) {
+                          wasPinching = true
+                          val zoomChange = event.calculateZoom()
+                          val panChange = event.calculatePan()
+                          val oldZoom = editorZoom
+                          val newZoom = (oldZoom * zoomChange).coerceIn(1f, 4.0f)
+                          if (abs(newZoom - oldZoom) > 0.002f) {
+                            editorZoom = newZoom
+                          }
+                          if (newZoom > 1.01f && panChange != Offset.Zero) {
+                            hScroll.dispatchRawDelta(-panChange.x)
+                            vScroll.dispatchRawDelta(-panChange.y)
+                          }
+                          event.changes.forEach { it.consume() }
+                        } else {
+                          if (wasPinching && pressed > 0) {
+                            event.changes.forEach { it.consume() }
+                          }
+                          if (pressed == 0) break
+                        }
+                      }
+                    }
+                  }
                   .then(if (editorZoom > 1.02f) Modifier.horizontalScroll(hScroll) else Modifier)
                   .verticalScroll(vScroll)
                   .padding(6.dp),
@@ -965,18 +1048,26 @@ fun PdfEditorScreen(
                     // Subtle dashed outlines over clickable existing PDF text blocks when EDIT_TEXT is active
                     if (activeTool == EditorTool.EDIT_TEXT) {
                       val dashEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 4f), 0f)
+                      val replacedBoxes = pageActions.filterIsInstance<PdfEditAction.RedactAndReplace>()
                       for (blk in pageTextBlocks) {
+                        val blkCx = (blk.leftNorm + blk.rightNorm) * 0.5f
+                        val blkCy = (blk.topNorm + blk.bottomNorm) * 0.5f
+                        val alreadyReplaced = replacedBoxes.any { r ->
+                          blkCx in min(r.leftNorm, r.rightNorm)..max(r.leftNorm, r.rightNorm) &&
+                            blkCy in min(r.topNorm, r.bottomNorm)..max(r.topNorm, r.bottomNorm)
+                        }
+                        if (alreadyReplaced) continue
                         val l = blk.leftNorm * size.width
                         val t = blk.topNorm * size.height
                         val w = ((blk.rightNorm - blk.leftNorm) * size.width).coerceAtLeast(14f)
                         val h = ((blk.bottomNorm - blk.topNorm) * size.height).coerceAtLeast(10f)
                         drawRect(
-                          color = Color(0xFF155EEF).copy(alpha = 0.05f),
+                          color = Color(0xFF155EEF).copy(alpha = 0.04f),
                           topLeft = Offset(l, t),
                           size = Size(w, h),
                         )
                         drawRect(
-                          color = Color(0xFF155EEF).copy(alpha = 0.42f),
+                          color = Color(0xFF155EEF).copy(alpha = 0.36f),
                           topLeft = Offset(l, t),
                           size = Size(w, h),
                           style = Stroke(width = 1f, pathEffect = dashEffect),
@@ -992,8 +1083,10 @@ fun PdfEditorScreen(
                           val py = act.yNorm * size.height
                           val style = TextStyle(
                             color = Color(act.colorArgb),
-                            fontSize = (act.fontSizeSp * fontScale).sp,
-                            fontWeight = FontWeight.Normal,
+                            fontSize = pdfPtToSp(act.fontSizeSp),
+                            fontFamily = composeFontFamily(act.font),
+                            fontWeight = if (act.isBold) FontWeight.Bold else FontWeight.Normal,
+                            fontStyle = if (act.isItalic) FontStyle.Italic else FontStyle.Normal,
                           )
                           val result = textMeasurer.measure(act.text, style)
                           drawText(result, topLeft = Offset(px, (py - result.size.height * 0.85f).coerceAtLeast(0f)))
@@ -1017,6 +1110,7 @@ fun PdfEditorScreen(
                               image = patch.bitmap.asImageBitmap(),
                               dstOffset = IntOffset(pLeft, pTop),
                               dstSize = IntSize(pW, pH),
+                              filterQuality = FilterQuality.High,
                             )
                           } else {
                             drawRect(
@@ -1030,7 +1124,10 @@ fun PdfEditorScreen(
                               act.replacementText,
                               TextStyle(
                                 color = Color(act.textColorArgb),
-                                fontSize = (act.fontSizeSp * fontScale).sp,
+                                fontSize = pdfPtToSp(act.fontSizeSp),
+                                fontFamily = composeFontFamily(act.font),
+                                fontWeight = if (act.isBold) FontWeight.Bold else FontWeight.Normal,
+                                fontStyle = if (act.isItalic) FontStyle.Italic else FontStyle.Normal,
                               ),
                             )
                             drawText(res, topLeft = Offset(l, t))
@@ -1105,6 +1202,7 @@ fun PdfEditorScreen(
                           image = patch.bitmap.asImageBitmap(),
                           dstOffset = IntOffset(pLeft, pTop),
                           dstSize = IntSize(pW, pH),
+                          filterQuality = FilterQuality.High,
                         )
                       }
                     }
@@ -1145,8 +1243,10 @@ fun PdfEditorScreen(
                         maxLines = 2,
                         textStyle = TextStyle(
                           color = session.color,
-                          fontSize = (session.fontSizeSp * fontScale).sp,
-                          fontWeight = FontWeight.Normal,
+                          fontSize = pdfPtToSp(session.fontSizeSp),
+                          fontFamily = composeFontFamily(session.font),
+                          fontWeight = if (session.isBold) FontWeight.Bold else FontWeight.Normal,
+                          fontStyle = if (session.isItalic) FontStyle.Italic else FontStyle.Normal,
                         ),
                         cursorBrush = SolidColor(Color(0xFF155EEF)),
                         decorationBox = { innerTextField ->
@@ -1155,7 +1255,8 @@ fun PdfEditorScreen(
                               Text(
                                 text = strings.textContentHint,
                                 color = Color(0xFF155EEF).copy(alpha = 0.45f),
-                                fontSize = (session.fontSizeSp * fontScale * 0.85f).sp,
+                                fontSize = pdfPtToSp(session.fontSizeSp * 0.85f),
+                                fontFamily = composeFontFamily(session.font),
                                 maxLines = 1,
                               )
                             }
@@ -1215,7 +1316,7 @@ fun PdfEditorScreen(
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                   IconButton(
                     onClick = {
-                      val nextSize = (currentSession.fontSizeSp - 1.5f).coerceAtLeast(7f)
+                      val nextSize = (currentSession.fontSizeSp - 0.5f).coerceAtLeast(6f)
                       selectedFontSize = nextSize
                       inlineEdit = currentSession.copy(fontSizeSp = nextSize)
                     },
@@ -1223,10 +1324,15 @@ fun PdfEditorScreen(
                   ) {
                     Icon(Icons.Filled.Remove, contentDescription = "Smaller text", modifier = Modifier.size(16.dp))
                   }
-                  Text("${currentSession.fontSizeSp.toInt()}pt", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                  val sizeText = if (currentSession.fontSizeSp % 1f == 0f) {
+                    "${currentSession.fontSizeSp.toInt()}pt"
+                  } else {
+                    "${currentSession.fontSizeSp}pt"
+                  }
+                  Text(sizeText, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                   IconButton(
                     onClick = {
-                      val nextSize = (currentSession.fontSizeSp + 1.5f).coerceAtMost(42f)
+                      val nextSize = (currentSession.fontSizeSp + 0.5f).coerceAtMost(42f)
                       selectedFontSize = nextSize
                       inlineEdit = currentSession.copy(fontSizeSp = nextSize)
                     },
@@ -1235,6 +1341,87 @@ fun PdfEditorScreen(
                     Icon(Icons.Filled.Add, contentDescription = "Larger text", modifier = Modifier.size(16.dp))
                   }
                 }
+              }
+              item {
+                Box {
+                  FilterChip(
+                    selected = false,
+                    onClick = { showFontMenu = true },
+                    label = {
+                      Text(
+                        currentSession.font.label,
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelSmall,
+                      )
+                    },
+                    trailingIcon = {
+                      Icon(Icons.Filled.ArrowDropDown, contentDescription = strings.fontFamilyLabel, modifier = Modifier.size(16.dp))
+                    },
+                    modifier = Modifier.height(30.dp).testTag("editor_font_picker_btn"),
+                  )
+                  DropdownMenu(
+                    expanded = showFontMenu,
+                    onDismissRequest = { showFontMenu = false },
+                  ) {
+                    EditorFont.entries.forEach { fontOpt ->
+                      DropdownMenuItem(
+                        text = {
+                          Text(
+                            fontOpt.label,
+                            fontFamily = composeFontFamily(fontOpt),
+                          )
+                        },
+                        trailingIcon = {
+                          if (currentSession.font == fontOpt) {
+                            Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                          }
+                        },
+                        onClick = {
+                          showFontMenu = false
+                          selectedFont = fontOpt
+                          inlineEdit = currentSession.copy(font = fontOpt)
+                        },
+                      )
+                    }
+                  }
+                }
+              }
+              item {
+                FilterChip(
+                  selected = currentSession.isBold,
+                  onClick = {
+                    val next = !currentSession.isBold
+                    selectedBold = next
+                    inlineEdit = currentSession.copy(isBold = next)
+                  },
+                  label = {
+                    Text(
+                      "B",
+                      fontWeight = FontWeight.Bold,
+                      style = MaterialTheme.typography.labelMedium,
+                    )
+                  },
+                  modifier = Modifier.height(30.dp).testTag("editor_bold_btn"),
+                )
+              }
+              item {
+                FilterChip(
+                  selected = currentSession.isItalic,
+                  onClick = {
+                    val next = !currentSession.isItalic
+                    selectedItalic = next
+                    inlineEdit = currentSession.copy(isItalic = next)
+                  },
+                  label = {
+                    Text(
+                      "I",
+                      fontStyle = FontStyle.Italic,
+                      fontFamily = FontFamily.Serif,
+                      style = MaterialTheme.typography.labelMedium,
+                    )
+                  },
+                  modifier = Modifier.height(30.dp).testTag("editor_italic_btn"),
+                )
               }
               items(colorPalette) { c ->
                 Box(
@@ -1264,8 +1451,8 @@ fun PdfEditorScreen(
                   }
                   Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
                   IconButton(
-                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
-                    enabled = editorZoom < 2.99f,
+                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(4.0f) },
+                    enabled = editorZoom < 3.99f,
                     modifier = Modifier.size(30.dp),
                   ) {
                     Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(16.dp))
@@ -1316,8 +1503,8 @@ fun PdfEditorScreen(
                   }
                   Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
                   IconButton(
-                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
-                    enabled = editorZoom < 2.99f,
+                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(4.0f) },
+                    enabled = editorZoom < 3.99f,
                     modifier = Modifier.size(32.dp),
                   ) {
                     Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(18.dp))
@@ -1328,6 +1515,42 @@ fun PdfEditorScreen(
                       modifier = Modifier.size(32.dp),
                     ) {
                       Icon(Icons.Filled.FitScreen, contentDescription = strings.fitWidth, modifier = Modifier.size(18.dp))
+                    }
+                  }
+                }
+              }
+              if (activeTool == EditorTool.EDIT_TEXT || activeTool == EditorTool.TEXT) {
+                item {
+                  Box {
+                    FilterChip(
+                      selected = false,
+                      onClick = { showFontMenu = true },
+                      label = {
+                        Text(selectedFont.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+                      },
+                      trailingIcon = {
+                        Icon(Icons.Filled.ArrowDropDown, contentDescription = strings.fontFamilyLabel, modifier = Modifier.size(16.dp))
+                      },
+                      modifier = Modifier.height(30.dp),
+                    )
+                    DropdownMenu(
+                      expanded = showFontMenu,
+                      onDismissRequest = { showFontMenu = false },
+                    ) {
+                      EditorFont.entries.forEach { fontOpt ->
+                        DropdownMenuItem(
+                          text = { Text(fontOpt.label, fontFamily = composeFontFamily(fontOpt)) },
+                          trailingIcon = {
+                            if (selectedFont == fontOpt) {
+                              Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                            }
+                          },
+                          onClick = {
+                            showFontMenu = false
+                            selectedFont = fontOpt
+                          },
+                        )
+                      }
                     }
                   }
                 }

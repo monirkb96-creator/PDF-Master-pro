@@ -487,9 +487,9 @@ fun PdfViewerScreen(
                 .weight(1f)
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                .pointerInput(currentPage, zoom) {
+                .pointerInput(currentPage) {
                   detectTransformGestures { _, panChange, zoomChange, _ ->
-                    val newZoom = (zoom * zoomChange).coerceIn(1f, 4f)
+                    val newZoom = (zoom * zoomChange).coerceIn(1f, 4.5f)
                     zoom = newZoom
                     pan = if (newZoom > 1f) pan + panChange else Offset.Zero
                   }

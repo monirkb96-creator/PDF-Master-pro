@@ -117,6 +117,17 @@ class PdfManipulationEngine(private val context: Context) {
     }.getOrDefault(emptyList())
   }
 
+  suspend fun getPageSizePt(file: File, pageIndex: Int): Pair<Float, Float> = withContext(Dispatchers.IO) {
+    runCatching {
+      PDDocument.load(file).use { doc ->
+        if (pageIndex !in 0 until doc.numberOfPages) return@use 595f to 842f
+        val page = doc.getPage(pageIndex)
+        val box = page.cropBox ?: page.mediaBox
+        box.width.coerceAtLeast(100f) to box.height.coerceAtLeast(100f)
+      }
+    }.getOrDefault(595f to 842f)
+  }
+
   suspend fun extractPageTextBlocks(file: File, pageIndex: Int): List<PdfTextBlock> =
     withContext(Dispatchers.IO) {
       runCatching {
@@ -168,9 +179,43 @@ class PdfManipulationEngine(private val context: Context) {
                 val minX = grp.minOf { it.xDirAdj }
                 val maxX = grp.maxOf { it.xDirAdj + it.widthDirAdj }
                 val baselineY = grp.map { it.yDirAdj }.average().toFloat()
-                val fontSize = grp.map { it.fontSizeInPt }.filter { it > 0f }.average().toFloat()
+                val rawFontSize = grp.map { it.fontSizeInPt }.filter { it > 0f }.average().toFloat()
                   .takeIf { !it.isNaN() } ?: 12f
-                val maxGlyphH = grp.maxOf { it.heightDir.coerceAtLeast(fontSize * 0.72f) }
+                val maxGlyphH = grp.maxOf { it.heightDir.coerceAtLeast(rawFontSize * 0.72f) }
+                val estByGlyphH = (maxGlyphH / 0.72f).coerceIn(7f, 48f)
+                val fontSize = if (rawFontSize in 5f..48f && abs(rawFontSize - estByGlyphH) <= estByGlyphH * 0.45f) {
+                  rawFontSize
+                } else {
+                  estByGlyphH
+                }
+
+                val fontNameLower = grp.firstOrNull { it.font?.name != null }?.font?.name.orEmpty().lowercase()
+                val isBold = fontNameLower.contains("bold") ||
+                  fontNameLower.contains("black") ||
+                  fontNameLower.contains("heavy") ||
+                  fontNameLower.contains("semibold") ||
+                  fontNameLower.contains("demi") ||
+                  fontNameLower.endsWith("-bd")
+                val isItalic = fontNameLower.contains("italic") ||
+                  fontNameLower.contains("oblique") ||
+                  fontNameLower.contains("slant")
+                val isSerif = fontNameLower.contains("times") ||
+                  fontNameLower.contains("serif") ||
+                  fontNameLower.contains("georgia") ||
+                  fontNameLower.contains("garamond") ||
+                  fontNameLower.contains("cambria") ||
+                  fontNameLower.contains("kalpurush") ||
+                  fontNameLower.contains("solaiman") ||
+                  fontNameLower.contains("nikosh")
+                val isMono = fontNameLower.contains("courier") ||
+                  fontNameLower.contains("mono") ||
+                  fontNameLower.contains("consolas")
+                val detectedFamily = when {
+                  blockText.any { it.code > 126 } -> if (isSerif) EditorFont.BENGALI_SERIF else EditorFont.BENGALI
+                  isMono -> EditorFont.COURIER
+                  isSerif -> EditorFont.TIMES
+                  else -> EditorFont.HELVETICA
+                }
 
                 val topNorm = ((baselineY - maxGlyphH * 1.08f) / pageH).coerceIn(0f, 0.985f)
                 val bottomNorm = ((baselineY + fontSize * 0.28f) / pageH).coerceIn(topNorm + 0.01f, 1f)
@@ -187,6 +232,9 @@ class PdfManipulationEngine(private val context: Context) {
                     rightNorm = rightNorm,
                     bottomNorm = bottomNorm,
                     fontSizePt = fontSize.coerceIn(7f, 48f),
+                    fontFamily = detectedFamily,
+                    isBold = isBold,
+                    isItalic = isItalic,
                   )
                 )
               }
@@ -210,12 +258,32 @@ class PdfManipulationEngine(private val context: Context) {
   ): Result<File> = withContext(Dispatchers.IO) {
     runCatching {
       PDDocument.load(sourceFile).use { doc ->
-        fun loadFont(fontChoice: EditorFont): PDFont {
+        fun loadFont(fontChoice: EditorFont, isBold: Boolean = false, isItalic: Boolean = false): PDFont {
           return when (fontChoice) {
-            EditorFont.HELVETICA -> PDType1Font.HELVETICA
-            EditorFont.TIMES -> PDType1Font.TIMES_ROMAN
-            EditorFont.COURIER -> PDType1Font.COURIER
-            EditorFont.BENGALI -> PDType1Font.HELVETICA
+            EditorFont.TIMES -> when {
+              isBold && isItalic -> PDType1Font.TIMES_BOLD_ITALIC
+              isBold -> PDType1Font.TIMES_BOLD
+              isItalic -> PDType1Font.TIMES_ITALIC
+              else -> PDType1Font.TIMES_ROMAN
+            }
+            EditorFont.COURIER -> when {
+              isBold && isItalic -> PDType1Font.COURIER_BOLD_OBLIQUE
+              isBold -> PDType1Font.COURIER_BOLD
+              isItalic -> PDType1Font.COURIER_OBLIQUE
+              else -> PDType1Font.COURIER
+            }
+            EditorFont.BENGALI_SERIF -> when {
+              isBold && isItalic -> PDType1Font.TIMES_BOLD_ITALIC
+              isBold -> PDType1Font.TIMES_BOLD
+              isItalic -> PDType1Font.TIMES_ITALIC
+              else -> PDType1Font.TIMES_ROMAN
+            }
+            EditorFont.HELVETICA, EditorFont.BENGALI -> when {
+              isBold && isItalic -> PDType1Font.HELVETICA_BOLD_OBLIQUE
+              isBold -> PDType1Font.HELVETICA_BOLD
+              isItalic -> PDType1Font.HELVETICA_OBLIQUE
+              else -> PDType1Font.HELVETICA
+            }
           }
         }
 
@@ -265,9 +333,20 @@ class PdfManipulationEngine(private val context: Context) {
                     val pdfX = mediaBox.lowerLeftX + action.xNorm.coerceIn(0f, 0.95f) * pageW
                     val pdfY = mediaBox.upperRightY - action.yNorm.coerceIn(0.02f, 0.98f) * pageH
                     if (action.text.any { it.code > 126 }) {
-                      drawShapedUnicodeText(doc, cs, action.text, pdfX, pdfY, action.fontSizeSp, action.colorArgb)
+                      drawShapedUnicodeText(
+                        doc = doc,
+                        cs = cs,
+                        text = action.text,
+                        pdfX = pdfX,
+                        pdfY = pdfY,
+                        fontSizePt = action.fontSizeSp,
+                        colorArgb = action.colorArgb,
+                        fontChoice = action.font,
+                        isBold = action.isBold,
+                        isItalic = action.isItalic,
+                      )
                     } else {
-                      val pdfFont = loadFont(action.font)
+                      val pdfFont = loadFont(action.font, action.isBold, action.isItalic)
                       val (r, g, b) = rgbComponents(action.colorArgb)
                       cs.beginText()
                       cs.setFont(pdfFont, action.fontSizeSp)
@@ -329,9 +408,20 @@ class PdfManipulationEngine(private val context: Context) {
                         if (line.isBlank()) return@forEachIndexed
                         val lineY = firstBaselineY - idx * lineStep
                         if (line.any { it.code > 126 }) {
-                          drawShapedUnicodeText(doc, cs, line, left, lineY, action.fontSizeSp, action.textColorArgb)
+                          drawShapedUnicodeText(
+                            doc = doc,
+                            cs = cs,
+                            text = line,
+                            pdfX = left,
+                            pdfY = lineY,
+                            fontSizePt = action.fontSizeSp,
+                            colorArgb = action.textColorArgb,
+                            fontChoice = action.font,
+                            isBold = action.isBold,
+                            isItalic = action.isItalic,
+                          )
                         } else {
-                          val pdfFont = loadFont(action.font)
+                          val pdfFont = loadFont(action.font, action.isBold, action.isItalic)
                           val (r, g, b) = rgbComponents(action.textColorArgb)
                           cs.beginText()
                           cs.setFont(pdfFont, action.fontSizeSp)
@@ -1038,17 +1128,32 @@ class PdfManipulationEngine(private val context: Context) {
     pdfY: Float,
     fontSizePt: Float,
     colorArgb: Int,
+    fontChoice: EditorFont = EditorFont.BENGALI,
+    isBold: Boolean = false,
+    isItalic: Boolean = false,
   ) {
     val scale = 3f
+    val baseTypeface = when (fontChoice) {
+      EditorFont.TIMES, EditorFont.BENGALI_SERIF -> android.graphics.Typeface.SERIF
+      EditorFont.COURIER -> android.graphics.Typeface.MONOSPACE
+      EditorFont.BENGALI -> runCatching {
+        androidx.core.content.res.ResourcesCompat.getFont(context, R.font.noto_sans_bengali)
+      }.getOrNull() ?: android.graphics.Typeface.SANS_SERIF
+      EditorFont.HELVETICA -> android.graphics.Typeface.SANS_SERIF
+    }
+    val tfStyle = (if (isBold) android.graphics.Typeface.BOLD else 0) or
+      (if (isItalic) android.graphics.Typeface.ITALIC else 0)
     val paint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
       color = colorArgb
       textSize = fontSizePt * scale
-      typeface = android.graphics.Typeface.DEFAULT
+      typeface = android.graphics.Typeface.create(baseTypeface, tfStyle)
+      if (isBold) isFakeBoldText = true
+      if (isItalic) textSkewX = -0.22f
     }
     val textW = paint.measureText(text).coerceAtLeast(12f)
     val fm = paint.fontMetrics
     val textH = (fm.descent - fm.ascent).coerceAtLeast(fontSizePt * scale)
-    val bmpW = (textW + 8f).toInt().coerceAtLeast(16)
+    val bmpW = (textW + 10f).toInt().coerceAtLeast(16)
     val bmpH = (textH + 8f).toInt().coerceAtLeast(16)
     val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
     bmp.eraseColor(Color.TRANSPARENT)
@@ -1104,10 +1209,10 @@ class PdfManipulationEngine(private val context: Context) {
       val cx = (tp.xDirAdj + tp.widthDirAdj * 0.5f) / pw
       val cy = (tp.yDirAdj - tp.heightDir.coerceAtLeast(tp.fontSizeInPt * 0.7f) * 0.4f) / ph
       return targets.mapNotNull { t ->
-        val l = min(t.leftNorm, t.rightNorm) - 0.004f
-        val r = max(t.leftNorm, t.rightNorm) + 0.004f
-        val top = min(t.topNorm, t.bottomNorm) - 0.006f
-        val bot = max(t.topNorm, t.bottomNorm) + 0.006f
+        val l = min(t.leftNorm, t.rightNorm) - 0.006f
+        val r = max(t.leftNorm, t.rightNorm) + 0.006f
+        val top = min(t.topNorm, t.bottomNorm) - 0.008f
+        val bot = max(t.topNorm, t.bottomNorm) + 0.008f
         if (cx in l..r && cy in top..bot) t.id else null
       }
     }

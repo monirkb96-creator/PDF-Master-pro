@@ -148,11 +148,13 @@ class OcrEngine(
     bitmap: Bitmap,
     pageIndex: Int,
     language: OcrLanguageChoice = OcrLanguageChoice.ENGLISH,
+    pageHeightPt: Float = 842f,
   ): List<PdfTextBlock> = detectHybridTextBlocks(
     bitmap = bitmap,
     pageIndex = pageIndex,
     language = language,
     existingVectorBlocks = emptyList(),
+    pageHeightPt = pageHeightPt,
   )
 
   suspend fun detectHybridTextBlocks(
@@ -160,8 +162,10 @@ class OcrEngine(
     pageIndex: Int,
     language: OcrLanguageChoice = OcrLanguageChoice.ENGLISH,
     existingVectorBlocks: List<PdfTextBlock> = emptyList(),
+    pageHeightPt: Float = 842f,
   ): List<PdfTextBlock> = withContext(Dispatchers.IO) {
     val merged = existingVectorBlocks.toMutableList()
+    val safePageH = pageHeightPt.coerceAtLeast(200f)
 
     fun overlapsAny(candidate: PdfTextBlock, list: List<PdfTextBlock>): Boolean {
       val candArea = ((candidate.rightNorm - candidate.leftNorm) * (candidate.bottomNorm - candidate.topNorm))
@@ -185,7 +189,7 @@ class OcrEngine(
 
     // 1. Run Bangla Tesseract if installed (provides pre-filled Bangla characters when model exists)
     if (isTesseractModelAvailable(OcrLanguageChoice.BANGLA)) {
-      val bnBlocks = runCatching { detectBlocksWithTesseract(bitmap, pageIndex, OcrLanguageChoice.BANGLA.code) }
+      val bnBlocks = runCatching { detectBlocksWithTesseract(bitmap, pageIndex, OcrLanguageChoice.BANGLA.code, safePageH) }
         .getOrDefault(emptyList())
       for (blk in bnBlocks) {
         if (!overlapsAny(blk, merged)) merged.add(blk)
@@ -193,14 +197,14 @@ class OcrEngine(
     }
 
     // 2. Run ML Kit Latin OCR for scanned English PDFs or English image sections
-    val mlKitBlocks = runCatching { detectBlocksWithMlKit(bitmap, pageIndex) }
+    val mlKitBlocks = runCatching { detectBlocksWithMlKit(bitmap, pageIndex, safePageH) }
       .getOrDefault(emptyList())
     for (blk in mlKitBlocks) {
       if (!overlapsAny(blk, merged)) merged.add(blk)
     }
 
     // 3. Offline visual dark-ink line/phrase detector for Bangla vector curves, image glyphs, or mixed forms
-    val visualBlocks = runCatching { BitmapPatchUtils.detectVisualTextLines(bitmap, pageIndex) }
+    val visualBlocks = runCatching { BitmapPatchUtils.detectVisualTextLines(bitmap, pageIndex, safePageH) }
       .getOrDefault(emptyList())
     for (blk in visualBlocks) {
       if (!overlapsAny(blk, merged)) merged.add(blk)
@@ -209,7 +213,11 @@ class OcrEngine(
     merged
   }
 
-  private suspend fun detectBlocksWithMlKit(bitmap: Bitmap, pageIndex: Int): List<PdfTextBlock> =
+  private suspend fun detectBlocksWithMlKit(
+    bitmap: Bitmap,
+    pageIndex: Int,
+    pageHeightPt: Float,
+  ): List<PdfTextBlock> =
     suspendCancellableCoroutine { cont ->
       val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
       val image = InputImage.fromBitmap(bitmap, 0)
@@ -229,7 +237,7 @@ class OcrEngine(
               val topNorm = (rect.top / bh).coerceIn(0f, 0.98f)
               val rightNorm = (rect.right / bw).coerceIn(leftNorm + 0.015f, 1f)
               val bottomNorm = (rect.bottom / bh).coerceIn(topNorm + 0.01f, 1f)
-              val estFontPt = ((rect.height() / bh) * 792f * 0.78f).coerceIn(9f, 40f)
+              val estFontPt = ((rect.height() / bh) * pageHeightPt * 0.95f).coerceIn(7f, 40f)
               blocks.add(
                 PdfTextBlock(
                   id = "ocr_${pageIndex}_${seq++}",
@@ -256,6 +264,7 @@ class OcrEngine(
     bitmap: Bitmap,
     pageIndex: Int,
     langCode: String,
+    pageHeightPt: Float,
   ): List<PdfTextBlock> {
     val tess = TessBaseAPI()
     val bw = bitmap.width.coerceAtLeast(1).toFloat()
@@ -278,7 +287,7 @@ class OcrEngine(
             val topNorm = (rect.top / bh).coerceIn(0f, 0.98f)
             val rightNorm = (rect.right / bw).coerceIn(leftNorm + 0.015f, 1f)
             val bottomNorm = (rect.bottom / bh).coerceIn(topNorm + 0.01f, 1f)
-            val estFontPt = ((rect.height() / bh) * 792f * 0.78f).coerceIn(9f, 40f)
+            val estFontPt = ((rect.height() / bh) * pageHeightPt * 0.95f).coerceIn(7f, 40f)
             blocks.add(
               PdfTextBlock(
                 id = "ocr_tess_${pageIndex}_${seq++}",
@@ -289,6 +298,11 @@ class OcrEngine(
                 rightNorm = rightNorm,
                 bottomNorm = bottomNorm,
                 fontSizePt = estFontPt,
+                fontFamily = if (langCode == OcrLanguageChoice.BANGLA.code || lineText.any { it.code > 126 }) {
+                  com.example.domain.model.EditorFont.BENGALI
+                } else {
+                  com.example.domain.model.EditorFont.HELVETICA
+                },
               )
             )
           }

@@ -41,7 +41,7 @@ object BitmapPatchUtils {
 
     val padX = max(2, (bw * 0.003f).roundToInt())
     val padY = max(2, (bh * 0.003f).roundToInt())
-    val ring = 6
+    val ring = max(8, (bw * 0.006f).roundToInt()).coerceAtMost(14)
 
     val x0 = (l * bw).roundToInt().coerceIn(0, bw - 2)
     val x1 = (r * bw).roundToInt().coerceIn(x0 + 1, bw - 1)
@@ -76,13 +76,66 @@ object BitmapPatchUtils {
     val innerStartY = outY0 - ctxY0
     val innerEndY = outY1 - ctxY0
 
-    // Estimate per-column local background from the top and bottom outer reference ring
+    // Compute clean bright fallback color from outer ring (top 30% brightest pixels)
+    val ringLums = mutableListOf<Float>()
+    val ringPixels = mutableListOf<Int>()
+    for (y in 0 until ch) {
+      for (x in 0 until cw) {
+        if (y !in innerStartY..innerEndY || x !in innerStartX..innerEndX) {
+          val idx = y * cw + x
+          ringLums.add(lums[idx])
+          ringPixels.add(pixels[idx])
+        }
+      }
+    }
+    var globalBgR = 255f
+    var globalBgG = 255f
+    var globalBgB = 255f
+    var globalBgLum = 1f
+    if (ringLums.isNotEmpty()) {
+      val sorted = ringLums.sorted()
+      val cutoffLum = sorted[(sorted.size * 0.68f).toInt().coerceIn(0, sorted.lastIndex)]
+      var sumR = 0f
+      var sumG = 0f
+      var sumB = 0f
+      var sumL = 0f
+      var cnt = 0
+      for (i in ringPixels.indices) {
+        if (ringLums[i] >= cutoffLum - 0.02f) {
+          val px = ringPixels[i]
+          sumR += Color.red(px)
+          sumG += Color.green(px)
+          sumB += Color.blue(px)
+          sumL += ringLums[i]
+          cnt++
+        }
+      }
+      if (cnt > 0) {
+        globalBgR = sumR / cnt
+        globalBgG = sumG / cnt
+        globalBgB = sumB / cnt
+        globalBgLum = sumL / cnt
+      }
+    }
+
+    // Estimate per-column local clean background from brightest outer-ring pixels in that column
     val colBgR = FloatArray(cw)
     val colBgG = FloatArray(cw)
     val colBgB = FloatArray(cw)
     val colBgLum = FloatArray(cw)
 
     for (x in 0 until cw) {
+      var colPeakLum = 0f
+      for (y in 0 until innerStartY) {
+        val lVal = lums[y * cw + x]
+        if (lVal > colPeakLum) colPeakLum = lVal
+      }
+      for (y in (innerEndY + 1) until ch) {
+        val lVal = lums[y * cw + x]
+        if (lVal > colPeakLum) colPeakLum = lVal
+      }
+
+      val threshold = (colPeakLum - 0.10f).coerceAtLeast(0.55f)
       var sumR = 0f
       var sumG = 0f
       var sumB = 0f
@@ -90,7 +143,7 @@ object BitmapPatchUtils {
       var cnt = 0
       for (y in 0 until innerStartY) {
         val idx = y * cw + x
-        if (lums[idx] > 0.52f) {
+        if (lums[idx] >= threshold) {
           val px = pixels[idx]
           sumR += Color.red(px)
           sumG += Color.green(px)
@@ -101,27 +154,7 @@ object BitmapPatchUtils {
       }
       for (y in (innerEndY + 1) until ch) {
         val idx = y * cw + x
-        if (lums[idx] > 0.52f) {
-          val px = pixels[idx]
-          sumR += Color.red(px)
-          sumG += Color.green(px)
-          sumB += Color.blue(px)
-          sumLum += lums[idx]
-          cnt++
-        }
-      }
-      if (cnt == 0) {
-        for (y in 0 until innerStartY) {
-          val idx = y * cw + x
-          val px = pixels[idx]
-          sumR += Color.red(px)
-          sumG += Color.green(px)
-          sumB += Color.blue(px)
-          sumLum += lums[idx]
-          cnt++
-        }
-        for (y in (innerEndY + 1) until ch) {
-          val idx = y * cw + x
+        if (lums[idx] >= threshold) {
           val px = pixels[idx]
           sumR += Color.red(px)
           sumG += Color.green(px)
@@ -136,16 +169,18 @@ object BitmapPatchUtils {
         colBgB[x] = sumB / cnt
         colBgLum[x] = sumLum / cnt
       } else {
-        colBgR[x] = 255f
-        colBgG[x] = 255f
-        colBgB[x] = 255f
-        colBgLum[x] = 1f
+        colBgR[x] = globalBgR
+        colBgG[x] = globalBgG
+        colBgB[x] = globalBgB
+        colBgLum[x] = globalBgLum
       }
     }
 
+    // Mask dark ink and anti-aliased glyph halos across the ENTIRE context window
+    // so nearby text/borders in the outer ring NEVER bleed dark smudges into inpainting.
     val mask = BooleanArray(cw * ch)
-    for (y in innerStartY..innerEndY) {
-      for (x in innerStartX..innerEndX) {
+    for (y in 0 until ch) {
+      for (x in 0 until cw) {
         val idx = y * cw + x
         val px = pixels[idx]
         val lum = lums[idx]
@@ -154,25 +189,27 @@ object BitmapPatchUtils {
         val dg = abs(Color.green(px) - colBgG[x])
         val db = abs(Color.blue(px) - colBgB[x])
         val maxDiff = max(dr, max(dg, db))
-        val isDarkText = lum < (bgLum - 0.11f) || (bgLum > 0.68f && lum < 0.45f)
-        val isColoredInk = lum < (bgLum - 0.05f) && maxDiff > 48f
+        val isDarkText = lum < (bgLum - 0.055f) || (bgLum > 0.65f && lum < 0.50f)
+        val isColoredInk = lum < (bgLum - 0.03f) && maxDiff > 32f
         if (isDarkText || isColoredInk) {
           mask[idx] = true
         }
       }
     }
 
-    // 1px dilation inside inner box to remove anti-aliased glyph halo fringes
+    // Dilate mask to eliminate anti-aliased halo fringes (2px inside high-res pages, 1px outside)
     val dilated = mask.copyOf()
-    for (y in innerStartY..innerEndY) {
-      for (x in innerStartX..innerEndX) {
+    val innerDilate = if (bw >= 800) 2 else 1
+    for (y in 0 until ch) {
+      for (x in 0 until cw) {
         val idx = y * cw + x
         if (!mask[idx]) continue
-        for (dy in -1..1) {
-          for (dx in -1..1) {
+        val rad = if (x in innerStartX..innerEndX && y in innerStartY..innerEndY) innerDilate else 1
+        for (dy in -rad..rad) {
+          for (dx in -rad..rad) {
             val nx = x + dx
             val ny = y + dy
-            if (nx in innerStartX..innerEndX && ny in innerStartY..innerEndY) {
+            if (nx in 0 until cw && ny in 0 until ch) {
               dilated[ny * cw + nx] = true
             }
           }
@@ -180,7 +217,19 @@ object BitmapPatchUtils {
       }
     }
 
+    // 8-direction inverse-distance weighted reconstruction from clean unmasked pixels
+    val dirs = arrayOf(
+      intArrayOf(0, -1),
+      intArrayOf(0, 1),
+      intArrayOf(-1, 0),
+      intArrayOf(1, 0),
+      intArrayOf(-1, -1),
+      intArrayOf(1, -1),
+      intArrayOf(-1, 1),
+      intArrayOf(1, 1),
+    )
     val outPixels = pixels.copyOf()
+    val maxSearch = max(ch, 24)
     for (y in innerStartY..innerEndY) {
       for (x in innerStartX..innerEndX) {
         val idx = y * cw + x
@@ -191,67 +240,26 @@ object BitmapPatchUtils {
         var accB = 0f
         var accW = 0f
 
-        // Nearest unmasked pixel above
-        for (dy in 1 until ch) {
-          val ny = y - dy
-          if (ny < 0) break
-          val nIdx = ny * cw + x
-          if (!dilated[nIdx]) {
-            val w = 1.6f / dy
-            val p = pixels[nIdx]
-            accR += Color.red(p) * w
-            accG += Color.green(p) * w
-            accB += Color.blue(p) * w
-            accW += w
-            break
-          }
-        }
-
-        // Nearest unmasked pixel below
-        for (dy in 1 until ch) {
-          val ny = y + dy
-          if (ny >= ch) break
-          val nIdx = ny * cw + x
-          if (!dilated[nIdx]) {
-            val w = 1.6f / dy
-            val p = pixels[nIdx]
-            accR += Color.red(p) * w
-            accG += Color.green(p) * w
-            accB += Color.blue(p) * w
-            accW += w
-            break
-          }
-        }
-
-        // Nearest unmasked pixel left
-        for (dx in 1..14) {
-          val nx = x - dx
-          if (nx < 0) break
-          val nIdx = y * cw + nx
-          if (!dilated[nIdx]) {
-            val w = 0.8f / dx
-            val p = pixels[nIdx]
-            accR += Color.red(p) * w
-            accG += Color.green(p) * w
-            accB += Color.blue(p) * w
-            accW += w
-            break
-          }
-        }
-
-        // Nearest unmasked pixel right
-        for (dx in 1..14) {
-          val nx = x + dx
-          if (nx >= cw) break
-          val nIdx = y * cw + nx
-          if (!dilated[nIdx]) {
-            val w = 0.8f / dx
-            val p = pixels[nIdx]
-            accR += Color.red(p) * w
-            accG += Color.green(p) * w
-            accB += Color.blue(p) * w
-            accW += w
-            break
+        for (d in dirs) {
+          val ddx = d[0]
+          val ddy = d[1]
+          val stepLen = if (ddx != 0 && ddy != 0) 1.414f else 1.0f
+          val dirBias = if (ddx == 0) 1.45f else if (ddy == 0) 0.85f else 0.75f
+          val limit = if (ddy == 0) min(18, cw) else maxSearch
+          for (s in 1..limit) {
+            val nx = x + ddx * s
+            val ny = y + ddy * s
+            if (nx !in 0 until cw || ny !in 0 until ch) break
+            val nIdx = ny * cw + nx
+            if (!dilated[nIdx]) {
+              val w = dirBias / (s * stepLen)
+              val p = pixels[nIdx]
+              accR += Color.red(p) * w
+              accG += Color.green(p) * w
+              accB += Color.blue(p) * w
+              accW += w
+              break
+            }
           }
         }
 
@@ -271,13 +279,31 @@ object BitmapPatchUtils {
       }
     }
 
+    // 1-pass gentle smoothing ONLY inside reconstructed pixels to eliminate any seam lines
+    val smoothed = outPixels.copyOf()
+    for (y in (innerStartY + 1) until innerEndY) {
+      for (x in (innerStartX + 1) until innerEndX) {
+        val idx = y * cw + x
+        if (!dilated[idx]) continue
+        val p0 = outPixels[idx]
+        val pL = outPixels[idx - 1]
+        val pR = outPixels[idx + 1]
+        val pU = outPixels[idx - cw]
+        val pD = outPixels[idx + cw]
+        val avgR = (Color.red(p0) * 2 + Color.red(pL) + Color.red(pR) + Color.red(pU) + Color.red(pD)) / 6
+        val avgG = (Color.green(p0) * 2 + Color.green(pL) + Color.green(pR) + Color.green(pU) + Color.green(pD)) / 6
+        val avgB = (Color.blue(p0) * 2 + Color.blue(pL) + Color.blue(pR) + Color.blue(pU) + Color.blue(pD)) / 6
+        smoothed[idx] = Color.rgb(avgR, avgG, avgB)
+      }
+    }
+
     val outW = outX1 - outX0 + 1
     val outH = outY1 - outY0 + 1
     val patchBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
     val cropped = IntArray(outW * outH)
     for (row in 0 until outH) {
       val srcStart = (innerStartY + row) * cw + innerStartX
-      System.arraycopy(outPixels, srcStart, cropped, row * outW, outW)
+      System.arraycopy(smoothed, srcStart, cropped, row * outW, outW)
     }
     patchBmp.setPixels(cropped, 0, outW, 0, 0, outW, outH)
 
@@ -295,7 +321,11 @@ object BitmapPatchUtils {
    * bitmap (including Bangla vector curves, scanned documents, and hybrid PDFs) while ignoring
    * pastel watermarks, QR codes, logos, and barcodes.
    */
-  fun detectVisualTextLines(pageBmp: Bitmap?, pageIndex: Int): List<PdfTextBlock> {
+  fun detectVisualTextLines(
+    pageBmp: Bitmap?,
+    pageIndex: Int,
+    pageHeightPt: Float = 842f,
+  ): List<PdfTextBlock> {
     if (pageBmp == null || pageBmp.width < 32 || pageBmp.height < 32) return emptyList()
     val bw = pageBmp.width
     val bh = pageBmp.height
@@ -452,7 +482,10 @@ object BitmapPatchUtils {
         val topNorm = ((segY0 * step - 2).coerceAtLeast(0).toFloat() / bh).coerceIn(0f, 0.98f)
         val rightNorm = (((segX1 + 1) * step + 2).coerceAtMost(bw).toFloat() / bw).coerceIn(leftNorm + 0.01f, 1f)
         val bottomNorm = (((segY1 + 1) * step + 2).coerceAtMost(bh).toFloat() / bh).coerceIn(topNorm + 0.008f, 1f)
-        val estFontPt = ((bottomNorm - topNorm) * 820f * 0.72f).coerceIn(8f, 36f)
+        // Compute font point size from ACTUAL tight ink height (excluding padding) in real PDF points
+        val tightInkHeightNorm = (segH * step).toFloat() / bh.coerceAtLeast(1)
+        val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.10f).coerceIn(7f, 36f)
+        val isBoldGuess = fillRatio >= 0.42f
 
         blocks.add(
           PdfTextBlock(
@@ -464,6 +497,7 @@ object BitmapPatchUtils {
             rightNorm = rightNorm,
             bottomNorm = bottomNorm,
             fontSizePt = estFontPt,
+            isBold = isBoldGuess,
           )
         )
       }
@@ -480,6 +514,7 @@ object BitmapPatchUtils {
     nx: Float,
     ny: Float,
     pageIndex: Int,
+    pageHeightPt: Float = 842f,
   ): PdfTextBlock? {
     if (pageBmp == null || pageBmp.width < 32 || pageBmp.height < 32) return null
     val bw = pageBmp.width
@@ -596,7 +631,8 @@ object BitmapPatchUtils {
     val topNorm = ((yTop - 3).coerceAtLeast(0).toFloat() / bh).coerceIn(0f, 0.98f)
     val rightNorm = ((xRight + 4).coerceAtMost(bw).toFloat() / bw).coerceIn(leftNorm + 0.01f, 1f)
     val bottomNorm = ((yBot + 4).coerceAtMost(bh).toFloat() / bh).coerceIn(topNorm + 0.008f, 1f)
-    val estFontPt = ((bottomNorm - topNorm) * 820f * 0.72f).coerceIn(8f, 36f)
+    val tightInkHeightNorm = lineH.toFloat() / bh.coerceAtLeast(1)
+    val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.10f).coerceIn(7f, 36f)
 
     return PdfTextBlock(
       id = "tap_ink_${pageIndex}_${cx}_${cy}",

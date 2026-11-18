@@ -18,10 +18,11 @@ enum class EditorTool {
 }
 
 enum class EditorFont(val label: String) {
-  HELVETICA("Helvetica"),
-  TIMES("Times"),
-  COURIER("Courier"),
-  BENGALI("বাংলা (Noto Sans)"),
+  HELVETICA("Sans"),
+  TIMES("Serif"),
+  COURIER("Mono"),
+  BENGALI("বাংলা Sans"),
+  BENGALI_SERIF("বাংলা Serif"),
 }
 
 enum class ShapeKind {
@@ -75,6 +76,8 @@ sealed interface PdfEditAction {
     val fontSizeSp: Float,
     val font: EditorFont,
     val colorArgb: Int,
+    val isBold: Boolean = false,
+    val isItalic: Boolean = false,
   ) : PdfEditAction
 
   data class RedactAndReplace(
@@ -90,6 +93,8 @@ sealed interface PdfEditAction {
     val font: EditorFont = EditorFont.HELVETICA,
     val backgroundArgb: Int = android.graphics.Color.WHITE,
     val preserveBackground: Boolean = true,
+    val isBold: Boolean = false,
+    val isItalic: Boolean = false,
   ) : PdfEditAction
 
   data class AddImage(
@@ -215,4 +220,7 @@ data class PdfTextBlock(
   val rightNorm: Float,
   val bottomNorm: Float,
   val fontSizePt: Float,
+  val fontFamily: EditorFont = EditorFont.HELVETICA,
+  val isBold: Boolean = false,
+  val isItalic: Boolean = false,
 )
