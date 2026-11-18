@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -28,15 +27,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -114,7 +110,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
@@ -164,7 +162,7 @@ private data class InlineEditSession(
   val backgroundColor: Color = Color.White,
 )
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PdfEditorScreen(
   docId: Long,
@@ -175,10 +173,13 @@ fun PdfEditorScreen(
 ) {
   val strings = LocalStrings.current
   val context = LocalContext.current
+  val density = LocalDensity.current
   val scope = rememberCoroutineScope()
   val keyboardController = LocalSoftwareKeyboardController.current
   val inlineFocusRequester = remember { FocusRequester() }
-  val bringIntoViewRequester = remember { BringIntoViewRequester() }
+
+  val hScroll = rememberScrollState()
+  val vScroll = rememberScrollState()
 
   var doc by remember { mutableStateOf<PdfDocumentEntity?>(null) }
   var pageCount by remember { mutableIntStateOf(0) }
@@ -193,6 +194,12 @@ fun PdfEditorScreen(
   var headerFooter by remember { mutableStateOf(HeaderFooterConfig()) }
   var showHeaderFooterDialog by remember { mutableStateOf(false) }
   var showSaveMenu by remember { mutableStateOf(false) }
+
+  // Viewport and page layout sizes for exact keyboard-aware scrolling
+  var viewportHeightPx by remember { mutableIntStateOf(0) }
+  var viewportWidthPx by remember { mutableIntStateOf(0) }
+  var pageWidthPx by remember { mutableIntStateOf(0) }
+  var pageHeightPx by remember { mutableIntStateOf(0) }
 
   // Detected selectable text blocks on the current page (vector PDF text or OCR on image PDFs)
   var pageTextBlocks by remember { mutableStateOf<List<PdfTextBlock>>(emptyList()) }
@@ -249,17 +256,34 @@ fun PdfEditorScreen(
     }
   }
 
+  // Focus inline text box on tap
   LaunchedEffect(inlineEdit?.sessionKey) {
-    if (inlineEdit != null) {
-      delay(80)
-      runCatching {
-        inlineFocusRequester.requestFocus()
-        keyboardController?.show()
-      }
-      delay(220)
-      runCatching {
-        bringIntoViewRequester.bringIntoView()
-      }
+    if (inlineEdit == null) return@LaunchedEffect
+    delay(60)
+    runCatching {
+      inlineFocusRequester.requestFocus()
+      keyboardController?.show()
+    }
+  }
+
+  // Keep the edited line centered above the soft keyboard once IME height settles
+  LaunchedEffect(inlineEdit?.sessionKey, viewportHeightPx) {
+    val session = inlineEdit ?: return@LaunchedEffect
+    if (viewportHeightPx <= 0 || pageHeightPx <= 0) return@LaunchedEffect
+    delay(90)
+    val maxScrollY = (pageHeightPx - viewportHeightPx).coerceAtLeast(0)
+    if (maxScrollY > 0) {
+      val targetCenterY = ((session.topNorm + session.bottomNorm) * 0.5f) * pageHeightPx
+      val desiredY = (targetCenterY - viewportHeightPx * 0.42f).roundToInt().coerceIn(0, maxScrollY)
+      vScroll.animateScrollTo(desiredY)
+    } else {
+      vScroll.animateScrollTo(0)
+    }
+    if (viewportWidthPx > 0 && pageWidthPx > viewportWidthPx) {
+      val maxScrollX = (pageWidthPx - viewportWidthPx).coerceAtLeast(0)
+      val targetLeftX = session.leftNorm * pageWidthPx
+      val desiredX = (targetLeftX - viewportWidthPx * 0.25f).roundToInt().coerceIn(0, maxScrollX)
+      hScroll.animateScrollTo(desiredX)
     }
   }
 
@@ -343,7 +367,6 @@ fun PdfEditorScreen(
 
     if (hitPending is PdfEditAction.RedactAndReplace) {
       val text = hitPending.replacementText
-      if (editorZoom < 1.55f) editorZoom = 1.65f
       inlineEdit = InlineEditSession(
         sessionKey = UUID.randomUUID().toString(),
         existingActionId = hitPending.id,
@@ -363,7 +386,6 @@ fun PdfEditorScreen(
 
     if (hitPending is PdfEditAction.AddText) {
       val text = hitPending.text
-      if (editorZoom < 1.55f) editorZoom = 1.65f
       inlineEdit = InlineEditSession(
         sessionKey = UUID.randomUUID().toString(),
         existingActionId = hitPending.id,
@@ -397,10 +419,6 @@ fun PdfEditorScreen(
         )
         val lum = (0.299f * sampledBg.red + 0.587f * sampledBg.green + 0.114f * sampledBg.blue)
         val defaultInk = if (lum < 0.45f) Color.White else selectedColor
-        // Gently zoom in on small table text so user can clearly see cursor & edits above keyboard
-        if (hitBlock.fontSizePt <= 14f && editorZoom < 1.55f) {
-          editorZoom = 1.65f
-        }
         inlineEdit = InlineEditSession(
           sessionKey = UUID.randomUUID().toString(),
           existingActionId = null,
@@ -420,7 +438,6 @@ fun PdfEditorScreen(
     }
 
     // 3. Otherwise open a new compact inline text cursor box right at the tapped coordinate
-    if (editorZoom < 1.35f) editorZoom = 1.45f
     inlineEdit = InlineEditSession(
       sessionKey = UUID.randomUUID().toString(),
       existingActionId = null,
@@ -616,231 +633,61 @@ fun PdfEditorScreen(
         .imePadding(),
     ) {
       Column(modifier = Modifier.fillMaxSize()) {
-        // 1. Sleek Tool Palette Strip
-        Surface(tonalElevation = 1.dp) {
-          LazyRow(
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            val tools = listOf(
-              Triple(EditorTool.EDIT_TEXT, strings.editorToolEditText, Icons.Filled.Edit),
-              Triple(EditorTool.TEXT, strings.editorToolText, Icons.Filled.TextFields),
-              Triple(EditorTool.SELECT, strings.editorToolSelect, Icons.Filled.OpenWith),
-              Triple(EditorTool.REDACT, strings.editorToolRedact, Icons.Filled.HideSource),
-              Triple(EditorTool.IMAGE, strings.editorToolImage, Icons.Filled.Image),
-              Triple(EditorTool.SHAPE, strings.editorToolShape, Icons.Filled.Category),
-              Triple(EditorTool.PEN, strings.editorToolPen, Icons.Filled.Brush),
-              Triple(EditorTool.HIGHLIGHT, strings.editorToolHighlight, Icons.Filled.BorderColor),
-              Triple(EditorTool.UNDERLINE, strings.editorToolUnderline, Icons.Filled.FormatUnderlined),
-              Triple(EditorTool.COMMENT, strings.editorToolComment, Icons.AutoMirrored.Filled.Comment),
-              Triple(EditorTool.HEADER_FOOTER, strings.editorToolHeaderFooter, Icons.Filled.ViewDay),
-            )
-            items(tools) { (tool, label, icon) ->
-              FilterChip(
-                selected = activeTool == tool,
-                onClick = {
-                  commitInlineEdit()
-                  when (tool) {
-                    EditorTool.IMAGE -> photoPicker.launch(
-                      PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                    EditorTool.HEADER_FOOTER -> showHeaderFooterDialog = true
-                    else -> activeTool = tool
-                  }
-                },
-                label = { Text(label, maxLines = 1, style = MaterialTheme.typography.labelMedium) },
-                leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(15.dp)) },
-                modifier = Modifier.height(32.dp).testTag("editor_tool_${tool.name.lowercase()}"),
+        // 1. Sleek Tool Palette Strip (only visible when not actively typing so canvas stays huge!)
+        if (inlineEdit == null) {
+          Surface(tonalElevation = 1.dp) {
+            LazyRow(
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              val tools = listOf(
+                Triple(EditorTool.EDIT_TEXT, strings.editorToolEditText, Icons.Filled.Edit),
+                Triple(EditorTool.TEXT, strings.editorToolText, Icons.Filled.TextFields),
+                Triple(EditorTool.SELECT, strings.editorToolSelect, Icons.Filled.OpenWith),
+                Triple(EditorTool.REDACT, strings.editorToolRedact, Icons.Filled.HideSource),
+                Triple(EditorTool.IMAGE, strings.editorToolImage, Icons.Filled.Image),
+                Triple(EditorTool.SHAPE, strings.editorToolShape, Icons.Filled.Category),
+                Triple(EditorTool.PEN, strings.editorToolPen, Icons.Filled.Brush),
+                Triple(EditorTool.HIGHLIGHT, strings.editorToolHighlight, Icons.Filled.BorderColor),
+                Triple(EditorTool.UNDERLINE, strings.editorToolUnderline, Icons.Filled.FormatUnderlined),
+                Triple(EditorTool.COMMENT, strings.editorToolComment, Icons.AutoMirrored.Filled.Comment),
+                Triple(EditorTool.HEADER_FOOTER, strings.editorToolHeaderFooter, Icons.Filled.ViewDay),
               )
-            }
-          }
-        }
-
-        // 2. Single-Row Sleek Contextual / Live Typing Bar (Scrollable, NEVER stretches vertically!)
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
-          val currentSession = inlineEdit
-          if (currentSession != null) {
-            LazyRow(
-              modifier = Modifier.fillMaxWidth(),
-              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-              horizontalArrangement = Arrangement.spacedBy(8.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              item {
-                Button(
-                  onClick = { commitInlineEdit() },
-                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                  modifier = Modifier.height(32.dp).testTag("editor_inline_done_btn"),
-                ) {
-                  Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(15.dp))
-                  Spacer(Modifier.width(4.dp))
-                  Text(strings.doneLabel, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium)
-                }
-              }
-              item {
-                IconButton(
+              items(tools) { (tool, label, icon) ->
+                FilterChip(
+                  selected = activeTool == tool,
                   onClick = {
-                    inlineEdit = null
-                    keyboardController?.hide()
+                    commitInlineEdit()
+                    when (tool) {
+                      EditorTool.IMAGE -> photoPicker.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                      )
+                      EditorTool.HEADER_FOOTER -> showHeaderFooterDialog = true
+                      else -> activeTool = tool
+                    }
                   },
-                  modifier = Modifier.size(32.dp),
-                ) {
-                  Icon(Icons.Filled.Close, contentDescription = strings.cancel, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
-                }
-              }
-              item {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                  IconButton(
-                    onClick = {
-                      val nextSize = (currentSession.fontSizeSp - 1.5f).coerceAtLeast(7f)
-                      selectedFontSize = nextSize
-                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
-                    },
-                    modifier = Modifier.size(30.dp),
-                  ) {
-                    Icon(Icons.Filled.Remove, contentDescription = "Smaller text", modifier = Modifier.size(16.dp))
-                  }
-                  Text("${currentSession.fontSizeSp.toInt()}pt", style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                  IconButton(
-                    onClick = {
-                      val nextSize = (currentSession.fontSizeSp + 1.5f).coerceAtMost(42f)
-                      selectedFontSize = nextSize
-                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
-                    },
-                    modifier = Modifier.size(30.dp),
-                  ) {
-                    Icon(Icons.Filled.Add, contentDescription = "Larger text", modifier = Modifier.size(16.dp))
-                  }
-                }
-              }
-              items(colorPalette) { c ->
-                Box(
-                  modifier = Modifier
-                    .size(22.dp)
-                    .clip(CircleShape)
-                    .background(c)
-                    .border(
-                      width = if (currentSession.color == c) 2.5.dp else 1.dp,
-                      color = if (currentSession.color == c) MaterialTheme.colorScheme.onSurface else Color.White,
-                      shape = CircleShape,
-                    )
-                    .clickable {
-                      selectedColor = c
-                      inlineEdit = currentSession.copy(color = c)
-                    },
-                )
-              }
-            }
-          } else {
-            LazyRow(
-              modifier = Modifier.fillMaxWidth(),
-              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-              horizontalArrangement = Arrangement.spacedBy(8.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              if (activeTool == EditorTool.EDIT_TEXT) {
-                item {
-                  FilterChip(
-                    selected = editorOcrLang == OcrLanguageChoice.BANGLA,
-                    onClick = {
-                      val next = if (editorOcrLang == OcrLanguageChoice.ENGLISH) {
-                        if (container.ocrEngine.isLanguageReady(OcrLanguageChoice.BANGLA)) {
-                          OcrLanguageChoice.BANGLA
-                        } else {
-                          onNotify(strings.ocrModelMissingBn)
-                          OcrLanguageChoice.ENGLISH
-                        }
-                      } else {
-                        OcrLanguageChoice.ENGLISH
-                      }
-                      editorOcrLang = next
-                      currentRenderedBmp?.let { bmp ->
-                        scope.launch {
-                          isScanningImageText = true
-                          pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, next)
-                          isScanningImageText = false
-                        }
-                      }
-                    },
-                    label = {
-                      Text(
-                        if (editorOcrLang == OcrLanguageChoice.BANGLA) "OCR: বাংলা" else "OCR: EN",
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                      )
-                    },
-                    leadingIcon = {
-                      Icon(Icons.Filled.DocumentScanner, contentDescription = null, modifier = Modifier.size(14.dp))
-                    },
-                    modifier = Modifier.height(30.dp),
-                  )
-                }
-              }
-              if (activeTool == EditorTool.SHAPE) {
-                items(ShapeKind.entries) { sk ->
-                  FilterChip(
-                    selected = selectedShape == sk,
-                    onClick = { selectedShape = sk },
-                    label = {
-                      Text(
-                        when (sk) {
-                          ShapeKind.RECTANGLE -> "Rect"
-                          ShapeKind.CIRCLE -> "Oval"
-                          ShapeKind.LINE -> "Line"
-                          ShapeKind.ARROW -> "Arrow"
-                        },
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                      )
-                    },
-                    modifier = Modifier.height(30.dp),
-                  )
-                }
-              }
-              items(colorPalette) { c ->
-                Box(
-                  modifier = Modifier
-                    .size(20.dp)
-                    .clip(CircleShape)
-                    .background(c)
-                    .border(
-                      width = if (selectedColor == c) 2.5.dp else 1.dp,
-                      color = if (selectedColor == c) MaterialTheme.colorScheme.onSurface else Color.White,
-                      shape = CircleShape,
-                    )
-                    .clickable { selectedColor = c },
-                )
-              }
-              item {
-                val tip = when {
-                  isScanningImageText -> strings.scanningPhotoTextHint
-                  activeTool == EditorTool.EDIT_TEXT && pageTextBlocks.isNotEmpty() -> strings.tapTextToEditHint
-                  activeTool == EditorTool.EDIT_TEXT -> strings.noSelectableTextHint
-                  activeTool == EditorTool.REDACT -> strings.redactNotice
-                  else -> strings.tapPageToPlace
-                }
-                Text(
-                  text = tip,
-                  style = MaterialTheme.typography.labelSmall,
-                  color = MaterialTheme.colorScheme.primary,
-                  maxLines = 1,
+                  label = { Text(label, maxLines = 1, style = MaterialTheme.typography.labelMedium) },
+                  leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(15.dp)) },
+                  modifier = Modifier.height(32.dp).testTag("editor_tool_${tool.name.lowercase()}"),
                 )
               }
             }
           }
         }
 
-        // 3. Full-Bleed Zoomable & Keyboard-Aware PDF Workspace
+        // 2. Full-Height Zoomable & Keyboard-Aware PDF Workspace
         BoxWithConstraints(
           modifier = Modifier
             .weight(1f)
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
+            .onSizeChanged { sz ->
+              viewportWidthPx = sz.width
+              viewportHeightPx = sz.height
+            },
         ) {
           val viewportWidth = maxWidth - 12.dp
-          val hScroll = rememberScrollState()
-          val vScroll = rememberScrollState()
           val f = doc?.let { File(it.filePath) }
 
           if (f != null && f.exists() && pageCount > 0) {
@@ -859,7 +706,7 @@ fun PdfEditorScreen(
               Box(
                 modifier = Modifier
                   .fillMaxSize()
-                  .horizontalScroll(hScroll)
+                  .then(if (editorZoom > 1.02f) Modifier.horizontalScroll(hScroll) else Modifier)
                   .verticalScroll(vScroll)
                   .padding(6.dp),
                 contentAlignment = Alignment.TopCenter,
@@ -870,6 +717,10 @@ fun PdfEditorScreen(
                     .aspectRatio(aspect)
                     .clip(RoundedCornerShape(4.dp))
                     .background(Color.White)
+                    .onSizeChanged { sz ->
+                      pageWidthPx = sz.width
+                      pageHeightPx = sz.height
+                    }
                     .pointerInput(activeTool, currentPage, selectedShape, selectedColor, pendingImagePath, pageTextBlocks, inlineEdit?.sessionKey) {
                       detectTapGestures { offset ->
                         val nx = (offset.x / size.width).coerceIn(0f, 1f)
@@ -1148,27 +999,24 @@ fun PdfEditorScreen(
                     }
                   }
 
-                  // Live Tightly-Fitted Inline Editable Text Box with blinking cursor (|)
+                  // Live Tightly-Fitted Inline Editable Text Box placed with exact layout padding
                   val session = inlineEdit
                   if (session != null) {
-                    val pageWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
-                    val pageHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
-                    val boxLeftPx = (session.leftNorm * pageWidthPx).roundToInt().coerceAtLeast(0)
-                    val boxTopPx = (session.topNorm * pageHeightPx).roundToInt().coerceAtLeast(0)
+                    val leftDp = with(density) { (session.leftNorm * constraints.maxWidth).toDp() }
+                    val topDp = with(density) { (session.topNorm * constraints.maxHeight).toDp() }
                     val origWidthDp = ((session.rightNorm - session.leftNorm) * zoomedWidth.value).coerceAtLeast(36f).dp
                     val maxRemainingDp = (zoomedWidth * (1f - session.leftNorm) - 4.dp).coerceAtLeast(origWidthDp)
 
                     Box(
                       modifier = Modifier
-                        .offset { IntOffset(boxLeftPx, boxTopPx) }
-                        .bringIntoViewRequester(bringIntoViewRequester)
+                        .padding(start = leftDp, top = topDp)
                         .width(IntrinsicSize.Min)
                         .widthIn(min = origWidthDp, max = maxRemainingDp)
                         .background(
                           color = if (session.isReplaceBox) session.backgroundColor else Color.White.copy(alpha = 0.94f),
                           shape = RoundedCornerShape(2.dp),
                         )
-                        .border(1.dp, Color(0xFF155EEF), RoundedCornerShape(2.dp))
+                        .border(1.2.dp, Color(0xFF155EEF), RoundedCornerShape(2.dp))
                         .padding(horizontal = 2.dp, vertical = 1.dp),
                     ) {
                       BasicTextField(
@@ -1176,7 +1024,7 @@ fun PdfEditorScreen(
                         onValueChange = { updated ->
                           inlineEdit = session.copy(value = updated)
                         },
-                        singleLine = true,
+                        maxLines = 2,
                         textStyle = TextStyle(
                           color = session.color,
                           fontSize = (session.fontSizeSp * fontScale).sp,
@@ -1200,63 +1048,231 @@ fun PdfEditorScreen(
           }
         }
 
-        // 4. Ultra-Slim Bottom Page & Zoom Bar (40dp height)
-        Surface(tonalElevation = 2.dp) {
-          Row(
-            modifier = Modifier
-              .fillMaxWidth()
-              .height(42.dp)
-              .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              IconButton(
-                onClick = {
-                  commitInlineEdit()
-                  if (currentPage > 0) currentPage--
-                },
-                enabled = currentPage > 0,
-                modifier = Modifier.size(34.dp),
-              ) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, modifier = Modifier.size(20.dp))
+        // 3. Adobe Acrobat-Style Bottom Toolbar (Right above keyboard when typing, or Page + Zoom + OCR when browsing!)
+        Surface(tonalElevation = 3.dp) {
+          val currentSession = inlineEdit
+          if (currentSession != null) {
+            LazyRow(
+              modifier = Modifier.fillMaxWidth().height(44.dp),
+              contentPadding = PaddingValues(horizontal = 8.dp),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              item {
+                Button(
+                  onClick = { commitInlineEdit() },
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                  modifier = Modifier.height(32.dp).testTag("editor_inline_done_btn"),
+                ) {
+                  Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                  Spacer(Modifier.width(4.dp))
+                  Text(strings.doneLabel, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium)
+                }
               }
-              Text("${currentPage + 1} / ${pageCount.coerceAtLeast(1)}", style = MaterialTheme.typography.labelMedium)
-              IconButton(
-                onClick = {
-                  commitInlineEdit()
-                  if (currentPage < pageCount - 1) currentPage++
-                },
-                enabled = currentPage < pageCount - 1,
-                modifier = Modifier.size(34.dp),
-              ) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, modifier = Modifier.size(20.dp))
+              item {
+                IconButton(
+                  onClick = {
+                    inlineEdit = null
+                    keyboardController?.hide()
+                  },
+                  modifier = Modifier.size(32.dp),
+                ) {
+                  Icon(Icons.Filled.Close, contentDescription = strings.cancel, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                }
+              }
+              item {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                  IconButton(
+                    onClick = {
+                      val nextSize = (currentSession.fontSizeSp - 1.5f).coerceAtLeast(7f)
+                      selectedFontSize = nextSize
+                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
+                    },
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.Remove, contentDescription = "Smaller text", modifier = Modifier.size(16.dp))
+                  }
+                  Text("${currentSession.fontSizeSp.toInt()}pt", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                  IconButton(
+                    onClick = {
+                      val nextSize = (currentSession.fontSizeSp + 1.5f).coerceAtMost(42f)
+                      selectedFontSize = nextSize
+                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
+                    },
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Larger text", modifier = Modifier.size(16.dp))
+                  }
+                }
+              }
+              items(colorPalette) { c ->
+                Box(
+                  modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(c)
+                    .border(
+                      width = if (currentSession.color == c) 2.5.dp else 1.dp,
+                      color = if (currentSession.color == c) MaterialTheme.colorScheme.onSurface else Color.White,
+                      shape = CircleShape,
+                    )
+                    .clickable {
+                      selectedColor = c
+                      inlineEdit = currentSession.copy(color = c)
+                    },
+                )
+              }
+              item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  IconButton(
+                    onClick = { editorZoom = (editorZoom - 0.35f).coerceAtLeast(1f) },
+                    enabled = editorZoom > 1.01f,
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.ZoomOut, contentDescription = strings.zoomOut, modifier = Modifier.size(16.dp))
+                  }
+                  Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                  IconButton(
+                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
+                    enabled = editorZoom < 2.99f,
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(16.dp))
+                  }
+                }
               }
             }
-
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-              IconButton(
-                onClick = { editorZoom = (editorZoom - 0.35f).coerceAtLeast(1f) },
-                enabled = editorZoom > 1.01f,
-                modifier = Modifier.size(34.dp),
-              ) {
-                Icon(Icons.Filled.ZoomOut, contentDescription = strings.zoomOut, modifier = Modifier.size(18.dp))
-              }
-              Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
-              IconButton(
-                onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
-                enabled = editorZoom < 2.99f,
-                modifier = Modifier.size(34.dp),
-              ) {
-                Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(18.dp))
-              }
-              if (editorZoom > 1.05f) {
-                IconButton(
-                  onClick = { editorZoom = 1f },
-                  modifier = Modifier.size(34.dp),
-                ) {
-                  Icon(Icons.Filled.FitScreen, contentDescription = strings.fitWidth, modifier = Modifier.size(18.dp))
+          } else {
+            LazyRow(
+              modifier = Modifier.fillMaxWidth().height(44.dp),
+              contentPadding = PaddingValues(horizontal = 8.dp),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  IconButton(
+                    onClick = {
+                      commitInlineEdit()
+                      if (currentPage > 0) currentPage--
+                    },
+                    enabled = currentPage > 0,
+                    modifier = Modifier.size(32.dp),
+                  ) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, modifier = Modifier.size(20.dp))
+                  }
+                  Text("${currentPage + 1}/${pageCount.coerceAtLeast(1)}", style = MaterialTheme.typography.labelMedium)
+                  IconButton(
+                    onClick = {
+                      commitInlineEdit()
+                      if (currentPage < pageCount - 1) currentPage++
+                    },
+                    enabled = currentPage < pageCount - 1,
+                    modifier = Modifier.size(32.dp),
+                  ) {
+                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, modifier = Modifier.size(20.dp))
+                  }
                 }
+              }
+              item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                  IconButton(
+                    onClick = { editorZoom = (editorZoom - 0.35f).coerceAtLeast(1f) },
+                    enabled = editorZoom > 1.01f,
+                    modifier = Modifier.size(32.dp),
+                  ) {
+                    Icon(Icons.Filled.ZoomOut, contentDescription = strings.zoomOut, modifier = Modifier.size(18.dp))
+                  }
+                  Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+                  IconButton(
+                    onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
+                    enabled = editorZoom < 2.99f,
+                    modifier = Modifier.size(32.dp),
+                  ) {
+                    Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(18.dp))
+                  }
+                  if (editorZoom > 1.05f) {
+                    IconButton(
+                      onClick = { editorZoom = 1f },
+                      modifier = Modifier.size(32.dp),
+                    ) {
+                      Icon(Icons.Filled.FitScreen, contentDescription = strings.fitWidth, modifier = Modifier.size(18.dp))
+                    }
+                  }
+                }
+              }
+              if (activeTool == EditorTool.EDIT_TEXT) {
+                item {
+                  FilterChip(
+                    selected = editorOcrLang == OcrLanguageChoice.BANGLA,
+                    onClick = {
+                      val next = if (editorOcrLang == OcrLanguageChoice.ENGLISH) {
+                        if (container.ocrEngine.isLanguageReady(OcrLanguageChoice.BANGLA)) {
+                          OcrLanguageChoice.BANGLA
+                        } else {
+                          onNotify(strings.ocrModelMissingBn)
+                          OcrLanguageChoice.ENGLISH
+                        }
+                      } else {
+                        OcrLanguageChoice.ENGLISH
+                      }
+                      editorOcrLang = next
+                      currentRenderedBmp?.let { bmp ->
+                        scope.launch {
+                          isScanningImageText = true
+                          pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, next)
+                          isScanningImageText = false
+                        }
+                      }
+                    },
+                    label = {
+                      Text(
+                        if (editorOcrLang == OcrLanguageChoice.BANGLA) "OCR: বাংলা" else "OCR: EN",
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelSmall,
+                      )
+                    },
+                    leadingIcon = {
+                      Icon(Icons.Filled.DocumentScanner, contentDescription = null, modifier = Modifier.size(14.dp))
+                    },
+                    modifier = Modifier.height(30.dp),
+                  )
+                }
+              }
+              if (activeTool == EditorTool.SHAPE) {
+                items(ShapeKind.entries) { sk ->
+                  FilterChip(
+                    selected = selectedShape == sk,
+                    onClick = { selectedShape = sk },
+                    label = {
+                      Text(
+                        when (sk) {
+                          ShapeKind.RECTANGLE -> "Rect"
+                          ShapeKind.CIRCLE -> "Oval"
+                          ShapeKind.LINE -> "Line"
+                          ShapeKind.ARROW -> "Arrow"
+                        },
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelSmall,
+                      )
+                    },
+                    modifier = Modifier.height(30.dp),
+                  )
+                }
+              }
+              items(colorPalette) { c ->
+                Box(
+                  modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(c)
+                    .border(
+                      width = if (selectedColor == c) 2.5.dp else 1.dp,
+                      color = if (selectedColor == c) MaterialTheme.colorScheme.onSurface else Color.White,
+                      shape = CircleShape,
+                    )
+                    .clickable { selectedColor = c },
+                )
               }
             }
           }
