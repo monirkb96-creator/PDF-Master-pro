@@ -7,6 +7,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.i18n.StringsBn
 import com.example.core.i18n.StringsEn
+import com.example.core.util.BitmapPatchUtils
 import com.example.domain.engine.DocxEngine
 import com.example.domain.engine.PdfManipulationEngine
 import com.example.domain.model.CompressionLevel
@@ -264,5 +265,92 @@ class PdfEngineRobolectricTest {
     assertTrue(pdfEngine.applyEdits(src, out, listOf(replaceAction)).isSuccess)
     val extracted = pdfEngine.extractTextByPage(out).first()
     assertTrue(extracted.contains("Updated Total 5000"))
+  }
+
+  @Test
+  fun `preserveBackground vector edit removes old text and keeps adjacent labels`() = runBlocking {
+    val src = tempFolder.newFile("cert_vector.pdf")
+    PDDocument().use { doc ->
+      val page = PDPage(PDRectangle.A4)
+      doc.addPage(page)
+      PDPageContentStream(doc, page).use { cs ->
+        // Draw pastel green watermark background stripe
+        cs.setNonStrokingColor(168, 213, 186)
+        cs.addRect(100f, 650f, 300f, 120f)
+        cs.fill()
+
+        // Draw adjacent label and editable value
+        cs.setNonStrokingColor(15, 23, 42)
+        cs.beginText()
+        cs.setFont(PDType1Font.HELVETICA, 14f)
+        cs.newLineAtOffset(60f, 700f)
+        cs.showText("Label:")
+        cs.newLineAtOffset(140f, 0f)
+        cs.showText("OldName")
+        cs.endText()
+      }
+      doc.save(src)
+    }
+
+    val blocks = pdfEngine.extractPageTextBlocks(src, 0)
+    val targetBlock = blocks.first { it.text.contains("OldName") }
+    val out = tempFolder.newFile("cert_vector_edited.pdf")
+    val replaceAction = PdfEditAction.RedactAndReplace(
+      id = "r_vec",
+      pageIndex = 0,
+      leftNorm = targetBlock.leftNorm,
+      topNorm = targetBlock.topNorm,
+      rightNorm = targetBlock.rightNorm,
+      bottomNorm = targetBlock.bottomNorm,
+      replacementText = "Monir",
+      fontSizeSp = targetBlock.fontSizePt,
+      textColorArgb = Color.BLACK,
+      font = EditorFont.HELVETICA,
+      preserveBackground = true,
+    )
+
+    val res = pdfEngine.applyEdits(src, out, listOf(replaceAction))
+    assertTrue(res.exceptionOrNull()?.stackTraceToString() ?: "failed", res.isSuccess)
+    val extracted = pdfEngine.extractTextByPage(out).first()
+    assertFalse("Old text should be stripped from PDF vector stream: $extracted", extracted.contains("OldName"))
+    assertTrue("Adjacent label should remain untouched: $extracted", extracted.contains("Label:"))
+    assertTrue("Replacement text should be present: $extracted", extracted.contains("Monir"))
+  }
+
+  @Test
+  fun `bitmap patch utils erases dark ink while preserving watermark color`() {
+    val bmp = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888)
+    bmp.eraseColor(Color.WHITE)
+    val watermarkGreen = Color.rgb(168, 213, 186)
+    for (y in 20..80) {
+      for (x in 40..160) {
+        bmp.setPixel(x, y, watermarkGreen)
+      }
+    }
+    // Paint dark ink bar inside the watermark region
+    val darkInk = Color.rgb(18, 18, 18)
+    for (y in 45..52) {
+      for (x in 70..130) {
+        bmp.setPixel(x, y, darkInk)
+      }
+    }
+
+    val patch = BitmapPatchUtils.createCleanBackgroundPatch(
+      pageBmp = bmp,
+      leftNorm = 68f / 200f,
+      topNorm = 43f / 100f,
+      rightNorm = 132f / 200f,
+      bottomNorm = 54f / 100f,
+    )
+    assertTrue("Expected non-null patch", patch != null)
+    val pbmp = patch!!.bitmap
+    val centerPx = pbmp.getPixel(pbmp.width / 2, pbmp.height / 2)
+    val r = Color.red(centerPx)
+    val g = Color.green(centerPx)
+    val b = Color.blue(centerPx)
+    assertTrue("Expected dark ink to be removed, got rgb($r,$g,$b)", g > 170)
+    assertTrue("Expected green watermark hue to be preserved instead of pure white, got rgb($r,$g,$b)", g > r + 15)
+    pbmp.recycle()
+    bmp.recycle()
   }
 }

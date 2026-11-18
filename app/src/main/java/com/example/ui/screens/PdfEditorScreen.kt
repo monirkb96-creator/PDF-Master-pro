@@ -84,6 +84,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -93,6 +94,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -127,6 +129,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.AppContainer
 import com.example.core.i18n.LocalStrings
+import com.example.core.util.BitmapPatchUtils
 import com.example.core.util.FileUtils
 import com.example.data.local.PdfDocumentEntity
 import com.example.domain.model.EditorFont
@@ -706,6 +709,61 @@ fun PdfEditorScreen(
               val zoomedWidth = (viewportWidth * editorZoom).coerceAtLeast(240.dp)
               val fontScale = (zoomedWidth.value / 595f).coerceIn(0.42f, 3.0f)
               val textMeasurer = rememberTextMeasurer()
+              val bgPatchCache = remember(bmp) { mutableMapOf<String, BitmapPatchUtils.PatchResult?>() }
+              DisposableEffect(bmp) {
+                onDispose {
+                  bgPatchCache.values.forEach { it?.bitmap?.recycle() }
+                  bgPatchCache.clear()
+                }
+              }
+              fun getOrCreateBgPatch(
+                leftNorm: Float,
+                topNorm: Float,
+                rightNorm: Float,
+                bottomNorm: Float,
+              ): BitmapPatchUtils.PatchResult? {
+                val key = "$leftNorm|$topNorm|$rightNorm|$bottomNorm"
+                return bgPatchCache.getOrPut(key) {
+                  BitmapPatchUtils.createCleanBackgroundPatch(bmp, leftNorm, topNorm, rightNorm, bottomNorm)
+                }
+              }
+
+              val currentOnPageTap by rememberUpdatedState { nx: Float, ny: Float ->
+                when (activeTool) {
+                  EditorTool.EDIT_TEXT -> openInlineForTap(nx, ny, preferExistingBlock = true)
+                  EditorTool.TEXT -> openInlineForTap(nx, ny, preferExistingBlock = false)
+                  EditorTool.COMMENT -> {
+                    commitInlineEdit()
+                    showCommentDialogAt = Offset(nx, ny)
+                  }
+                  EditorTool.IMAGE -> {
+                    commitInlineEdit()
+                    val imgPath = pendingImagePath
+                    if (imgPath != null) {
+                      pushAction(
+                        PdfEditAction.AddImage(
+                          id = UUID.randomUUID().toString(),
+                          pageIndex = currentPage,
+                          leftNorm = (nx - 0.15f).coerceIn(0f, 0.7f),
+                          topNorm = (ny - 0.1f).coerceIn(0f, 0.7f),
+                          widthNorm = 0.30f,
+                          heightNorm = 0.20f,
+                          imagePath = imgPath,
+                        )
+                      )
+                    } else {
+                      photoPicker.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                      )
+                    }
+                  }
+                  EditorTool.SELECT -> {
+                    commitInlineEdit()
+                    selectedActionId = actions.lastOrNull { it.pageIndex == currentPage }?.id
+                  }
+                  else -> Unit
+                }
+              }
 
               Box(
                 modifier = Modifier
@@ -725,44 +783,11 @@ fun PdfEditorScreen(
                       pageWidthPx = sz.width
                       pageHeightPx = sz.height
                     }
-                    .pointerInput(activeTool, currentPage, selectedShape, selectedColor, pendingImagePath, pageTextBlocks, inlineEdit?.sessionKey) {
+                    .pointerInput(currentPage) {
                       detectTapGestures { offset ->
                         val nx = (offset.x / size.width).coerceIn(0f, 1f)
                         val ny = (offset.y / size.height).coerceIn(0f, 1f)
-                        when (activeTool) {
-                          EditorTool.EDIT_TEXT -> openInlineForTap(nx, ny, preferExistingBlock = true)
-                          EditorTool.TEXT -> openInlineForTap(nx, ny, preferExistingBlock = false)
-                          EditorTool.COMMENT -> {
-                            commitInlineEdit()
-                            showCommentDialogAt = Offset(nx, ny)
-                          }
-                          EditorTool.IMAGE -> {
-                            commitInlineEdit()
-                            val imgPath = pendingImagePath
-                            if (imgPath != null) {
-                              pushAction(
-                                PdfEditAction.AddImage(
-                                  id = UUID.randomUUID().toString(),
-                                  pageIndex = currentPage,
-                                  leftNorm = (nx - 0.15f).coerceIn(0f, 0.7f),
-                                  topNorm = (ny - 0.1f).coerceIn(0f, 0.7f),
-                                  widthNorm = 0.30f,
-                                  heightNorm = 0.20f,
-                                  imagePath = imgPath,
-                                )
-                              )
-                            } else {
-                              photoPicker.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                              )
-                            }
-                          }
-                          EditorTool.SELECT -> {
-                            commitInlineEdit()
-                            selectedActionId = actions.lastOrNull { it.pageIndex == currentPage }?.id
-                          }
-                          else -> Unit
-                        }
+                        currentOnPageTap(nx, ny)
                       }
                     }
                     .pointerInput(activeTool, currentPage, selectedShape, selectedColor, strokeWidth) {
@@ -927,11 +952,28 @@ fun PdfEditorScreen(
                           val t = min(act.topNorm, act.bottomNorm) * size.height
                           val w = abs(act.rightNorm - act.leftNorm) * size.width
                           val h = abs(act.bottomNorm - act.topNorm) * size.height
-                          drawRect(
-                            Color(act.backgroundArgb),
-                            topLeft = Offset(l - 1f, t - 1f),
-                            size = Size(w.coerceAtLeast(14f) + 2f, h.coerceAtLeast(10f) + 2f),
-                          )
+                          val patch = if (act.preserveBackground) {
+                            getOrCreateBgPatch(act.leftNorm, act.topNorm, act.rightNorm, act.bottomNorm)
+                          } else {
+                            null
+                          }
+                          if (patch != null && !patch.bitmap.isRecycled) {
+                            val pLeft = (patch.leftNorm * size.width).roundToInt()
+                            val pTop = (patch.topNorm * size.height).roundToInt()
+                            val pW = ((patch.rightNorm - patch.leftNorm) * size.width).roundToInt().coerceAtLeast(4)
+                            val pH = ((patch.bottomNorm - patch.topNorm) * size.height).roundToInt().coerceAtLeast(4)
+                            drawImage(
+                              image = patch.bitmap.asImageBitmap(),
+                              dstOffset = IntOffset(pLeft, pTop),
+                              dstSize = IntSize(pW, pH),
+                            )
+                          } else {
+                            drawRect(
+                              Color(act.backgroundArgb),
+                              topLeft = Offset(l - 1f, t - 1f),
+                              size = Size(w.coerceAtLeast(14f) + 2f, h.coerceAtLeast(10f) + 2f),
+                            )
+                          }
                           if (act.replacementText.isNotBlank()) {
                             val res = textMeasurer.measure(
                               act.replacementText,
@@ -994,6 +1036,28 @@ fun PdfEditorScreen(
                       }
                     }
 
+                    // Clean watermark-preserving patch under the active inline replacement box
+                    val activeSession = inlineEdit
+                    if (activeSession != null && activeSession.isReplaceBox) {
+                      val patch = getOrCreateBgPatch(
+                        activeSession.leftNorm,
+                        activeSession.topNorm,
+                        activeSession.rightNorm,
+                        activeSession.bottomNorm,
+                      )
+                      if (patch != null && !patch.bitmap.isRecycled) {
+                        val pLeft = (patch.leftNorm * size.width).roundToInt()
+                        val pTop = (patch.topNorm * size.height).roundToInt()
+                        val pW = ((patch.rightNorm - patch.leftNorm) * size.width).roundToInt().coerceAtLeast(4)
+                        val pH = ((patch.bottomNorm - patch.topNorm) * size.height).roundToInt().coerceAtLeast(4)
+                        drawImage(
+                          image = patch.bitmap.asImageBitmap(),
+                          dstOffset = IntOffset(pLeft, pTop),
+                          dstSize = IntSize(pW, pH),
+                        )
+                      }
+                    }
+
                     // Live pen stroke preview
                     if (activePenPoints.size >= 2) {
                       val p = Path()
@@ -1017,10 +1081,10 @@ fun PdfEditorScreen(
                         .width(IntrinsicSize.Min)
                         .widthIn(min = origWidthDp, max = maxRemainingDp)
                         .background(
-                          color = if (session.isReplaceBox) session.backgroundColor else Color.White.copy(alpha = 0.94f),
+                          color = Color.Transparent,
                           shape = RoundedCornerShape(2.dp),
                         )
-                        .border(1.2.dp, Color(0xFF155EEF), RoundedCornerShape(2.dp))
+                        .border(1.dp, Color(0xFF155EEF).copy(alpha = 0.85f), RoundedCornerShape(2.dp))
                         .padding(horizontal = 2.dp, vertical = 1.dp),
                     ) {
                       BasicTextField(
@@ -1318,6 +1382,7 @@ fun PdfEditorScreen(
               fontSizeSp = selectedFontSize,
               textColorArgb = selectedColor.toArgb(),
               font = selectedFont,
+              preserveBackground = false,
             )
           )
           showRedactDialogAt = null

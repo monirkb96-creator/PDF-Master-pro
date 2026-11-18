@@ -21,18 +21,27 @@ import com.example.domain.model.PdfTextBlock
 import com.example.domain.model.ShapeKind
 import com.example.domain.model.SplitMode
 import com.example.domain.model.WatermarkPosition
+import com.example.core.util.BitmapPatchUtils
+import com.tom_roush.pdfbox.contentstream.operator.Operator
+import com.tom_roush.pdfbox.cos.COSArray
+import com.tom_roush.pdfbox.cos.COSBase
+import com.tom_roush.pdfbox.cos.COSFloat
 import com.tom_roush.pdfbox.cos.COSName
+import com.tom_roush.pdfbox.cos.COSString
 import com.tom_roush.pdfbox.io.MemoryUsageSetting
 import com.tom_roush.pdfbox.multipdf.PDFMergerUtility
+import com.tom_roush.pdfbox.pdfwriter.ContentStreamWriter
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
 import com.tom_roush.pdfbox.pdmodel.PDPageContentStream
 import com.tom_roush.pdfbox.pdmodel.common.PDRectangle
+import com.tom_roush.pdfbox.pdmodel.common.PDStream
 import com.tom_roush.pdfbox.pdmodel.encryption.AccessPermission
 import com.tom_roush.pdfbox.pdmodel.encryption.StandardProtectionPolicy
 import com.tom_roush.pdfbox.pdmodel.font.PDFont
 import com.tom_roush.pdfbox.pdmodel.font.PDType0Font
 import com.tom_roush.pdfbox.pdmodel.font.PDType1Font
+import com.tom_roush.pdfbox.pdmodel.graphics.form.PDFormXObject
 import com.tom_roush.pdfbox.pdmodel.graphics.image.JPEGFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.LosslessFactory
 import com.tom_roush.pdfbox.pdmodel.graphics.image.PDImageXObject
@@ -41,6 +50,7 @@ import com.tom_roush.pdfbox.pdmodel.interactive.annotation.PDAnnotationText
 import com.tom_roush.pdfbox.text.PDFTextStripper
 import com.tom_roush.pdfbox.text.TextPosition
 import com.tom_roush.pdfbox.util.Matrix
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
@@ -225,60 +235,104 @@ class PdfManipulationEngine(private val context: Context) {
           val pageW = mediaBox.width
           val pageH = mediaBox.height
 
-          PDPageContentStream(
-            doc,
-            page,
-            PDPageContentStream.AppendMode.APPEND,
-            true,
-            true,
-          ).use { cs ->
-            for (action in pageActions) {
-              when (action) {
-                is PdfEditAction.AddText -> {
-                  val pdfX = mediaBox.lowerLeftX + action.xNorm.coerceIn(0f, 0.95f) * pageW
-                  val pdfY = mediaBox.upperRightY - action.yNorm.coerceIn(0.02f, 0.98f) * pageH
-                  if (action.text.any { it.code > 126 }) {
-                    drawShapedUnicodeText(doc, cs, action.text, pdfX, pdfY, action.fontSizeSp, action.colorArgb)
-                  } else {
-                    val pdfFont = loadFont(action.font)
-                    val (r, g, b) = rgbComponents(action.colorArgb)
-                    cs.beginText()
-                    cs.setFont(pdfFont, action.fontSizeSp)
-                    cs.setNonStrokingColor(r, g, b)
-                    cs.newLineAtOffset(pdfX, pdfY)
-                    cs.showText(safePdfText(action.text, pdfFont))
-                    cs.endText()
-                  }
-                }
+          val preserveReplaceActions = pageActions
+            .filterIsInstance<PdfEditAction.RedactAndReplace>()
+            .filter { it.preserveBackground }
+          val vectorCleanedIds = if (preserveReplaceActions.isNotEmpty()) {
+            removeVectorTextInBoxes(doc, pageIdx, page, preserveReplaceActions)
+          } else {
+            emptySet()
+          }
 
-                is PdfEditAction.RedactAndReplace -> {
-                  val left = mediaBox.lowerLeftX + min(action.leftNorm, action.rightNorm) * pageW
-                  val right = mediaBox.lowerLeftX + max(action.leftNorm, action.rightNorm) * pageW
-                  val top = mediaBox.upperRightY - min(action.topNorm, action.bottomNorm) * pageH
-                  val bottom = mediaBox.upperRightY - max(action.topNorm, action.bottomNorm) * pageH
-                  val boxW = (right - left).coerceAtLeast(12f)
-                  val boxH = (top - bottom).coerceAtLeast(12f)
-                  // Opaque cover matching sampled background color with 2pt padding so old text edges are cleanly hidden
-                  val (bgR, bgG, bgB) = rgbComponents(action.backgroundArgb)
-                  cs.setNonStrokingColor(bgR, bgG, bgB)
-                  cs.addRect(left - 2f, bottom - 2f, boxW + 4f, boxH + 4f)
-                  cs.fill()
-                  if (action.replacementText.isNotBlank()) {
-                    val baselineY = bottom + (boxH * 0.22f)
-                    if (action.replacementText.any { it.code > 126 }) {
-                      drawShapedUnicodeText(doc, cs, action.replacementText, left, baselineY, action.fontSizeSp, action.textColorArgb)
+          val needsScannedBgPatch = preserveReplaceActions.any { it.id !in vectorCleanedIds }
+          val scannedPageBmp = if (needsScannedBgPatch) {
+            renderPageBitmapBestEffort(sourceFile, pageIdx)
+          } else {
+            null
+          }
+
+          try {
+            PDPageContentStream(
+              doc,
+              page,
+              PDPageContentStream.AppendMode.APPEND,
+              true,
+              true,
+            ).use { cs ->
+              for (action in pageActions) {
+                when (action) {
+                  is PdfEditAction.AddText -> {
+                    val pdfX = mediaBox.lowerLeftX + action.xNorm.coerceIn(0f, 0.95f) * pageW
+                    val pdfY = mediaBox.upperRightY - action.yNorm.coerceIn(0.02f, 0.98f) * pageH
+                    if (action.text.any { it.code > 126 }) {
+                      drawShapedUnicodeText(doc, cs, action.text, pdfX, pdfY, action.fontSizeSp, action.colorArgb)
                     } else {
                       val pdfFont = loadFont(action.font)
-                      val (r, g, b) = rgbComponents(action.textColorArgb)
+                      val (r, g, b) = rgbComponents(action.colorArgb)
                       cs.beginText()
                       cs.setFont(pdfFont, action.fontSizeSp)
                       cs.setNonStrokingColor(r, g, b)
-                      cs.newLineAtOffset(left, baselineY)
-                      cs.showText(safePdfText(action.replacementText, pdfFont))
+                      cs.newLineAtOffset(pdfX, pdfY)
+                      cs.showText(safePdfText(action.text, pdfFont))
                       cs.endText()
                     }
                   }
-                }
+
+                  is PdfEditAction.RedactAndReplace -> {
+                    val left = mediaBox.lowerLeftX + min(action.leftNorm, action.rightNorm) * pageW
+                    val right = mediaBox.lowerLeftX + max(action.leftNorm, action.rightNorm) * pageW
+                    val top = mediaBox.upperRightY - min(action.topNorm, action.bottomNorm) * pageH
+                    val bottom = mediaBox.upperRightY - max(action.topNorm, action.bottomNorm) * pageH
+                    val boxW = (right - left).coerceAtLeast(12f)
+                    val boxH = (top - bottom).coerceAtLeast(12f)
+
+                    if (action.preserveBackground && action.id in vectorCleanedIds) {
+                      // Vector text already stripped from content stream; background watermark/lines stay untouched.
+                    } else if (action.preserveBackground && scannedPageBmp != null) {
+                      val patch = BitmapPatchUtils.createCleanBackgroundPatch(
+                        scannedPageBmp,
+                        action.leftNorm,
+                        action.topNorm,
+                        action.rightNorm,
+                        action.bottomNorm,
+                      )
+                      if (patch != null) {
+                        val pdPatch = LosslessFactory.createFromImage(doc, patch.bitmap)
+                        patch.bitmap.recycle()
+                        val pLeft = mediaBox.lowerLeftX + patch.leftNorm * pageW
+                        val pW = ((patch.rightNorm - patch.leftNorm) * pageW).coerceAtLeast(4f)
+                        val pH = ((patch.bottomNorm - patch.topNorm) * pageH).coerceAtLeast(4f)
+                        val pBottom = mediaBox.upperRightY - patch.bottomNorm * pageH
+                        cs.drawImage(pdPatch, pLeft, pBottom, pW, pH)
+                      } else {
+                        val (bgR, bgG, bgB) = rgbComponents(action.backgroundArgb)
+                        cs.setNonStrokingColor(bgR, bgG, bgB)
+                        cs.addRect(left - 2f, bottom - 2f, boxW + 4f, boxH + 4f)
+                        cs.fill()
+                      }
+                    } else {
+                      val (bgR, bgG, bgB) = rgbComponents(action.backgroundArgb)
+                      cs.setNonStrokingColor(bgR, bgG, bgB)
+                      cs.addRect(left - 2f, bottom - 2f, boxW + 4f, boxH + 4f)
+                      cs.fill()
+                    }
+
+                    if (action.replacementText.isNotBlank()) {
+                      val baselineY = bottom + (boxH * 0.22f)
+                      if (action.replacementText.any { it.code > 126 }) {
+                        drawShapedUnicodeText(doc, cs, action.replacementText, left, baselineY, action.fontSizeSp, action.textColorArgb)
+                      } else {
+                        val pdfFont = loadFont(action.font)
+                        val (r, g, b) = rgbComponents(action.textColorArgb)
+                        cs.beginText()
+                        cs.setFont(pdfFont, action.fontSizeSp)
+                        cs.setNonStrokingColor(r, g, b)
+                        cs.newLineAtOffset(left, baselineY)
+                        cs.showText(safePdfText(action.replacementText, pdfFont))
+                        cs.endText()
+                      }
+                    }
+                  }
 
                 is PdfEditAction.AddImage -> {
                   val imgFile = File(action.imagePath)
@@ -395,6 +449,9 @@ class PdfManipulationEngine(private val context: Context) {
                 }
               }
             }
+            }
+          } finally {
+            scannedPageBmp?.recycle()
           }
         }
 
@@ -990,6 +1047,317 @@ class PdfManipulationEngine(private val context: Context) {
     val pdImg = LosslessFactory.createFromImage(doc, bmp)
     cs.drawImage(pdImg, pdfX, pdfY - (fm.descent + 4f) / scale, bmpW / scale, bmpH / scale)
     bmp.recycle()
+  }
+
+  private fun renderPageBitmapBestEffort(pdfFile: File, pageIndex: Int): Bitmap? {
+    return runCatching {
+      ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+        PdfRenderer(pfd).use { renderer ->
+          if (pageIndex !in 0 until renderer.pageCount) return@runCatching null
+          renderer.openPage(pageIndex).use { page ->
+            val w = 1500
+            val h = (page.height * (w.toFloat() / page.width.coerceAtLeast(1))).toInt().coerceAtLeast(1)
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(Color.WHITE)
+            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            bmp
+          }
+        }
+      }
+    }.getOrNull()
+  }
+
+  private fun removeVectorTextInBoxes(
+    doc: PDDocument,
+    pageIndex: Int,
+    page: PDPage,
+    targets: List<PdfEditAction.RedactAndReplace>,
+  ): Set<String> {
+    if (targets.isEmpty()) return emptySet()
+    val matchedTargetIds = mutableSetOf<String>()
+
+    data class StreamBuffer(
+      val pageTarget: PDPage? = null,
+      val formTarget: PDFormXObject? = null,
+      val tokens: MutableList<Any> = mutableListOf(),
+      var modified: Boolean = false,
+    )
+
+    val allBuffers = mutableListOf<StreamBuffer>()
+    val bufferStack = ArrayDeque<StreamBuffer>()
+    val depthStack = ArrayDeque<Int>()
+    val opPositions = mutableListOf<TextPosition>()
+
+    fun matchTargetsForPosition(tp: TextPosition): List<String> {
+      val pw = tp.pageWidth.coerceAtLeast(1f)
+      val ph = tp.pageHeight.coerceAtLeast(1f)
+      val cx = (tp.xDirAdj + tp.widthDirAdj * 0.5f) / pw
+      val cy = (tp.yDirAdj - tp.heightDir.coerceAtLeast(tp.fontSizeInPt * 0.7f) * 0.4f) / ph
+      return targets.mapNotNull { t ->
+        val l = min(t.leftNorm, t.rightNorm) - 0.004f
+        val r = max(t.leftNorm, t.rightNorm) + 0.004f
+        val top = min(t.topNorm, t.bottomNorm) - 0.006f
+        val bot = max(t.topNorm, t.bottomNorm) + 0.006f
+        if (cx in l..r && cy in top..bot) t.id else null
+      }
+    }
+
+    fun computeAdvanceThousandths(tmBefore: Matrix?, tmAfter: Matrix?, tfs: Float, th: Float): Float {
+      if (tmBefore == null || tmAfter == null || abs(tfs) < 0.0001f || abs(th) < 0.0001f) return 0f
+      return runCatching {
+        val mBefore = tmBefore.createAffineTransform()
+        val mAfter = tmAfter.createAffineTransform()
+        if (abs(mBefore.determinant) < 1e-9) return 0f
+        val delta = mBefore.createInverse().apply { concatenate(mAfter) }
+        val tx = delta.translateX.toFloat()
+        -(tx / (tfs * th)) * 1000f
+      }.getOrDefault(0f)
+    }
+
+    fun glyphAdvanceThousandths(tp: TextPosition, tfs: Float, tc: Float, tw: Float): Float {
+      val codes = tp.characterCodes
+      val font = tp.font
+      val w0 = if (codes != null && codes.isNotEmpty() && font != null) {
+        runCatching { font.getWidth(codes[0]) }.getOrDefault(0f)
+      } else {
+        0f
+      }
+      var total = w0
+      if (abs(tfs) > 0.0001f) {
+        total += (tc / tfs) * 1000f
+        if (codes != null && codes.isNotEmpty() && codes[0] == 32) {
+          total += (tw / tfs) * 1000f
+        }
+      }
+      return total
+    }
+
+    fun splitCosStringIntoTjArray(
+      cosStr: COSString,
+      positions: List<TextPosition>,
+      hits: List<Boolean>,
+      tfs: Float,
+      tc: Float,
+      tw: Float,
+      outArray: COSArray,
+    ): Boolean {
+      val raw = cosStr.bytes ?: return false
+      val n = positions.size
+      if (n == 0) return false
+      val bytesPerGlyph = when (raw.size) {
+        n -> 1
+        n * 2 -> 2
+        else -> return false
+      }
+      var i = 0
+      while (i < n) {
+        if (!hits[i]) {
+          val keptOut = ByteArrayOutputStream()
+          while (i < n && !hits[i]) {
+            val start = i * bytesPerGlyph
+            keptOut.write(raw, start, bytesPerGlyph)
+            i++
+          }
+          outArray.add(COSString(keptOut.toByteArray()))
+        } else {
+          var removedAdv = 0f
+          while (i < n && hits[i]) {
+            removedAdv += glyphAdvanceThousandths(positions[i], tfs, tc, tw)
+            i++
+          }
+          if (abs(removedAdv) > 0.5f) {
+            outArray.add(COSFloat(-removedAdv))
+          }
+        }
+      }
+      return true
+    }
+
+    val stripper = object : PDFTextStripper() {
+      override fun processPage(p: PDPage) {
+        val buf = StreamBuffer(pageTarget = p)
+        allBuffers.add(buf)
+        bufferStack.addLast(buf)
+        depthStack.addLast(0)
+        try {
+          super.processPage(p)
+        } finally {
+          depthStack.removeLast()
+          bufferStack.removeLast()
+        }
+      }
+
+      override fun showForm(form: PDFormXObject) {
+        val existing = allBuffers.firstOrNull { it.formTarget?.cosObject === form.cosObject }
+        val buf = if (existing == null) StreamBuffer(formTarget = form).also { allBuffers.add(it) } else null
+        if (buf != null) bufferStack.addLast(buf)
+        depthStack.addLast(0)
+        try {
+          super.showForm(form)
+        } finally {
+          depthStack.removeLast()
+          if (buf != null) bufferStack.removeLast()
+        }
+      }
+
+      override fun processTextPosition(text: TextPosition) {
+        opPositions.add(text)
+        super.processTextPosition(text)
+      }
+
+      override fun processOperator(operator: Operator, operands: MutableList<COSBase>) {
+        val buf = bufferStack.lastOrNull()
+        val depth = depthStack.lastOrNull() ?: -1
+        if (buf == null || depth != 0) {
+          super.processOperator(operator, operands)
+          return
+        }
+        depthStack[depthStack.lastIndex] = 1
+        try {
+          val opName = operator.name
+          if (opName !in setOf("Tj", "TJ", "'", "\"")) {
+            super.processOperator(operator, operands)
+            buf.tokens.addAll(operands)
+            buf.tokens.add(operator)
+            return
+          }
+
+          opPositions.clear()
+          val tmBefore = textMatrix?.clone()
+          val textState = graphicsState.textState
+          val tfs = textState.fontSize
+          val th = textState.horizontalScaling / 100f
+          val tc = textState.characterSpacing
+          val tw = textState.wordSpacing
+
+          super.processOperator(operator, operands)
+
+          if (opPositions.isEmpty()) {
+            buf.tokens.addAll(operands)
+            buf.tokens.add(operator)
+            return
+          }
+
+          val perGlyphHits = opPositions.map { tp ->
+            val ids = matchTargetsForPosition(tp)
+            matchedTargetIds.addAll(ids)
+            ids.isNotEmpty()
+          }
+          val hitCount = perGlyphHits.count { it }
+
+          if (hitCount == 0) {
+            buf.tokens.addAll(operands)
+            buf.tokens.add(operator)
+            return
+          }
+
+          if (hitCount == opPositions.size) {
+            buf.modified = true
+            if (opName == "\"" && operands.size >= 2) {
+              buf.tokens.add(operands[0])
+              buf.tokens.add(Operator.getOperator("Tw"))
+              buf.tokens.add(operands[1])
+              buf.tokens.add(Operator.getOperator("Tc"))
+              buf.tokens.add(Operator.getOperator("T*"))
+            } else if (opName == "'") {
+              buf.tokens.add(Operator.getOperator("T*"))
+            }
+            val adv = computeAdvanceThousandths(tmBefore, textMatrix, tfs, th)
+            if (abs(adv) > 0.5f) {
+              buf.tokens.add(COSArray().apply { add(COSFloat(adv)) })
+              buf.tokens.add(Operator.getOperator("TJ"))
+            }
+            return
+          }
+
+          // Partial match within a single Tj or TJ operator: replace only matched glyphs
+          if (opName == "Tj" && operands.firstOrNull() is COSString) {
+            val cosStr = operands[0] as COSString
+            val arr = COSArray()
+            if (splitCosStringIntoTjArray(cosStr, opPositions, perGlyphHits, tfs, tc, tw, arr)) {
+              buf.modified = true
+              if (arr.size() > 0) {
+                buf.tokens.add(arr)
+                buf.tokens.add(Operator.getOperator("TJ"))
+              }
+              return
+            }
+          } else if (opName == "TJ" && operands.firstOrNull() is COSArray) {
+            val origArr = operands[0] as COSArray
+            val newArr = COSArray()
+            var posCursor = 0
+            var splitOk = true
+            for (elem in origArr) {
+              if (elem is COSString) {
+                val raw = elem.bytes ?: byteArrayOf()
+                // Approximate byte slice matching if remaining positions fit 1x or 2x
+                val remaining = opPositions.size - posCursor
+                val segCount = when {
+                  raw.isEmpty() -> 0
+                  raw.size <= remaining && opPositions.subList(posCursor, posCursor + raw.size).all { it.characterCodes?.getOrNull(0)?.let { c -> c <= 0xFF } != false } -> raw.size
+                  raw.size % 2 == 0 && (raw.size / 2) <= remaining -> raw.size / 2
+                  else -> {
+                    splitOk = false
+                    break
+                  }
+                }
+                if (segCount > 0) {
+                  val subPos = opPositions.subList(posCursor, posCursor + segCount)
+                  val subHit = perGlyphHits.subList(posCursor, posCursor + segCount)
+                  if (subHit.none { it }) {
+                    newArr.add(elem)
+                  } else if (!splitCosStringIntoTjArray(elem, subPos, subHit, tfs, tc, tw, newArr)) {
+                    splitOk = false
+                    break
+                  }
+                  posCursor += segCount
+                }
+              } else {
+                newArr.add(elem)
+              }
+            }
+            if (splitOk && posCursor == opPositions.size) {
+              buf.modified = true
+              if (newArr.size() > 0) {
+                buf.tokens.add(newArr)
+                buf.tokens.add(Operator.getOperator("TJ"))
+              }
+              return
+            }
+          }
+
+          // Safe fallback if a single mixed CID ligature cannot be sliced byte-for-byte
+          buf.tokens.addAll(operands)
+          buf.tokens.add(operator)
+        } finally {
+          depthStack[depthStack.lastIndex] = 0
+        }
+      }
+    }
+
+    runCatching {
+      stripper.sortByPosition = false
+      stripper.startPage = pageIndex + 1
+      stripper.endPage = pageIndex + 1
+      stripper.getText(doc)
+
+      for (buf in allBuffers) {
+        if (!buf.modified) continue
+        if (buf.pageTarget != null) {
+          val newStream = PDStream(doc)
+          newStream.createOutputStream(COSName.FLATE_DECODE).use { out ->
+            ContentStreamWriter(out).writeTokens(buf.tokens)
+          }
+          buf.pageTarget.setContents(newStream)
+        } else if (buf.formTarget != null) {
+          buf.formTarget.cosObject.createOutputStream(COSName.FLATE_DECODE).use { out ->
+            ContentStreamWriter(out).writeTokens(buf.tokens)
+          }
+        }
+      }
+    }
+
+    return matchedTargetIds
   }
 
   private fun safePdfText(input: String, font: PDFont): String {
