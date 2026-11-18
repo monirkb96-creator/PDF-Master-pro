@@ -10,6 +10,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
@@ -213,7 +214,12 @@ private fun PdfMasterAppRoot(
       }
     },
   ) { innerPadding ->
-    Row(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+    Row(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(innerPadding)
+        .consumeWindowInsets(innerPadding),
+    ) {
       if (isTopLevel && useRail) {
         NavigationRail(modifier = Modifier.fillMaxHeight()) {
           topTabs.forEachIndexed { idx, (route, label, icons) ->

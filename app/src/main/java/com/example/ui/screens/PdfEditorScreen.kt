@@ -2,6 +2,7 @@ package com.example.ui.screens
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,7 +27,6 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -540,11 +540,16 @@ fun PdfEditorScreen(
     Color(0xFF7C3AED),
   )
 
+  BackHandler(enabled = inlineEdit != null) {
+    commitInlineEdit()
+  }
+
   Scaffold(
     contentWindowInsets = WindowInsets(0, 0, 0, 0),
     topBar = {
       TopAppBar(
         title = { Text(strings.toolEditPdf, maxLines = 1) },
+        windowInsets = WindowInsets(0, 0, 0, 0),
         navigationIcon = {
           IconButton(onClick = {
             commitInlineEdit()
@@ -629,8 +634,7 @@ fun PdfEditorScreen(
     Box(
       modifier = Modifier
         .fillMaxSize()
-        .padding(innerPadding)
-        .imePadding(),
+        .padding(innerPadding),
     ) {
       Column(modifier = Modifier.fillMaxSize()) {
         // 1. Sleek Tool Palette Strip (only visible when not actively typing so canvas stays huge!)
