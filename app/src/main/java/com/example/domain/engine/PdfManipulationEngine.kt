@@ -231,7 +231,7 @@ class PdfManipulationEngine(private val context: Context) {
         for ((pageIdx, pageActions) in grouped) {
           if (pageIdx !in 0 until doc.numberOfPages) continue
           val page = doc.getPage(pageIdx)
-          val mediaBox = page.mediaBox
+          val mediaBox = page.cropBox ?: page.mediaBox
           val pageW = mediaBox.width
           val pageH = mediaBox.height
 
@@ -318,18 +318,28 @@ class PdfManipulationEngine(private val context: Context) {
                     }
 
                     if (action.replacementText.isNotBlank()) {
-                      val baselineY = bottom + (boxH * 0.22f)
-                      if (action.replacementText.any { it.code > 126 }) {
-                        drawShapedUnicodeText(doc, cs, action.replacementText, left, baselineY, action.fontSizeSp, action.textColorArgb)
+                      val lines = action.replacementText.replace("\r", "").split('\n')
+                      val lineStep = (action.fontSizeSp * 1.25f).coerceAtLeast(10f)
+                      val firstBaselineY = if (lines.size <= 1) {
+                        bottom + (boxH * 0.22f)
                       } else {
-                        val pdfFont = loadFont(action.font)
-                        val (r, g, b) = rgbComponents(action.textColorArgb)
-                        cs.beginText()
-                        cs.setFont(pdfFont, action.fontSizeSp)
-                        cs.setNonStrokingColor(r, g, b)
-                        cs.newLineAtOffset(left, baselineY)
-                        cs.showText(safePdfText(action.replacementText, pdfFont))
-                        cs.endText()
+                        (top - action.fontSizeSp * 0.92f).coerceAtLeast(bottom + lineStep * (lines.size - 1))
+                      }
+                      lines.forEachIndexed { idx, line ->
+                        if (line.isBlank()) return@forEachIndexed
+                        val lineY = firstBaselineY - idx * lineStep
+                        if (line.any { it.code > 126 }) {
+                          drawShapedUnicodeText(doc, cs, line, left, lineY, action.fontSizeSp, action.textColorArgb)
+                        } else {
+                          val pdfFont = loadFont(action.font)
+                          val (r, g, b) = rgbComponents(action.textColorArgb)
+                          cs.beginText()
+                          cs.setFont(pdfFont, action.fontSizeSp)
+                          cs.setNonStrokingColor(r, g, b)
+                          cs.newLineAtOffset(left, lineY)
+                          cs.showText(safePdfText(line, pdfFont))
+                          cs.endText()
+                        }
                       }
                     }
                   }

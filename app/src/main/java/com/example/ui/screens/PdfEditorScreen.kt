@@ -245,17 +245,17 @@ fun PdfEditorScreen(
     val file = File(path)
     if (!file.exists()) return@LaunchedEffect
     val vectorBlocks = container.pdfEngine.extractPageTextBlocks(file, currentPage)
-    if (vectorBlocks.isNotEmpty()) {
-      pageTextBlocks = vectorBlocks
-    } else {
-      val bmp = currentRenderedBmp
-      if (bmp != null) {
-        isScanningImageText = true
-        pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, editorOcrLang)
-        isScanningImageText = false
-      } else {
-        pageTextBlocks = emptyList()
-      }
+    pageTextBlocks = vectorBlocks
+    val bmp = currentRenderedBmp
+    if (bmp != null) {
+      isScanningImageText = true
+      pageTextBlocks = container.ocrEngine.detectHybridTextBlocks(
+        bitmap = bmp,
+        pageIndex = currentPage,
+        language = editorOcrLang,
+        existingVectorBlocks = vectorBlocks,
+      )
+      isScanningImageText = false
     }
   }
 
@@ -343,30 +343,66 @@ fun PdfEditorScreen(
     }
   }
 
+  fun distToRectSq(px: Float, py: Float, l: Float, t: Float, r: Float, b: Float): Float {
+    val dx = when {
+      px < l -> l - px
+      px > r -> px - r
+      else -> 0f
+    }
+    val dy = when {
+      py < t -> t - py
+      py > b -> py - b
+      else -> 0f
+    }
+    return dx * dx + dy * dy
+  }
+
   fun openInlineForTap(nx: Float, ny: Float, preferExistingBlock: Boolean) {
     commitInlineEdit()
 
     // 1. Check if user tapped an existing pending AddText / RedactAndReplace action on this page
-    val hitPending = actions.lastOrNull { act ->
-      if (act.pageIndex != currentPage) return@lastOrNull false
-      when (act) {
-        is PdfEditAction.RedactAndReplace -> {
-          val l = min(act.leftNorm, act.rightNorm) - 0.015f
-          val r = max(act.leftNorm, act.rightNorm) + 0.06f
-          val t = min(act.topNorm, act.bottomNorm) - 0.015f
-          val b = max(act.topNorm, act.bottomNorm) + 0.015f
-          nx in l..r && ny in t..b
+    val hitPending = actions
+      .filter { act ->
+        if (act.pageIndex != currentPage) return@filter false
+        when (act) {
+          is PdfEditAction.RedactAndReplace -> {
+            val l = min(act.leftNorm, act.rightNorm) - 0.008f
+            val r = max(act.leftNorm, act.rightNorm) + 0.014f
+            val t = min(act.topNorm, act.bottomNorm) - 0.008f
+            val b = max(act.topNorm, act.bottomNorm) + 0.008f
+            nx in l..r && ny in t..b
+          }
+          is PdfEditAction.AddText -> {
+            val l = act.xNorm - 0.012f
+            val r = (act.xNorm + (act.text.length * 0.015f).coerceAtLeast(0.10f)).coerceAtMost(1f)
+            val b = act.yNorm + 0.016f
+            val t = (act.yNorm - 0.032f).coerceAtLeast(0f)
+            nx in l..r && ny in t..b
+          }
+          else -> false
         }
-        is PdfEditAction.AddText -> {
-          val l = act.xNorm - 0.02f
-          val r = (act.xNorm + (act.text.length * 0.016f).coerceAtLeast(0.14f)).coerceAtMost(1f)
-          val b = act.yNorm + 0.02f
-          val t = (act.yNorm - 0.04f).coerceAtLeast(0f)
-          nx in l..r && ny in t..b
-        }
-        else -> false
       }
-    }
+      .minByOrNull { act ->
+        when (act) {
+          is PdfEditAction.RedactAndReplace -> distToRectSq(
+            nx,
+            ny,
+            min(act.leftNorm, act.rightNorm),
+            min(act.topNorm, act.bottomNorm),
+            max(act.leftNorm, act.rightNorm),
+            max(act.topNorm, act.bottomNorm),
+          )
+          is PdfEditAction.AddText -> distToRectSq(
+            nx,
+            ny,
+            act.xNorm,
+            (act.yNorm - 0.022f).coerceAtLeast(0f),
+            (act.xNorm + 0.14f).coerceAtMost(1f),
+            act.yNorm + 0.006f,
+          )
+          else -> Float.MAX_VALUE
+        }
+      }
 
     if (hitPending is PdfEditAction.RedactAndReplace) {
       val text = hitPending.replacementText
@@ -405,12 +441,25 @@ fun PdfEditorScreen(
       return
     }
 
-    // 2. Check if user tapped an existing extracted text block from the PDF (vector or OCR)
+    // 2. Check if user tapped an existing extracted text block (vector, OCR, or offline visual Bangla phrase)
     if (preferExistingBlock) {
-      val hitBlock = pageTextBlocks.firstOrNull { blk ->
-        nx in (blk.leftNorm - 0.015f)..(blk.rightNorm + 0.02f) &&
-          ny in (blk.topNorm - 0.015f)..(blk.bottomNorm + 0.015f)
+      val strictMatches = pageTextBlocks.filter { blk ->
+        nx in (blk.leftNorm - 0.004f)..(blk.rightNorm + 0.004f) &&
+          ny in (blk.topNorm - 0.004f)..(blk.bottomNorm + 0.004f)
       }
+      val nearMatches = if (strictMatches.isNotEmpty()) {
+        strictMatches
+      } else {
+        pageTextBlocks.filter { blk ->
+          nx in (blk.leftNorm - 0.012f)..(blk.rightNorm + 0.012f) &&
+            ny in (blk.topNorm - 0.010f)..(blk.bottomNorm + 0.010f)
+        }
+      }
+      val hitBlock = nearMatches.minWithOrNull(
+        compareBy<PdfTextBlock> { distToRectSq(nx, ny, it.leftNorm, it.topNorm, it.rightNorm, it.bottomNorm) }
+          .thenBy { (it.rightNorm - it.leftNorm) * (it.bottomNorm - it.topNorm) }
+      ) ?: BitmapPatchUtils.detectInkPhraseAt(currentRenderedBmp, nx, ny, currentPage)
+
       if (hitBlock != null) {
         val text = hitBlock.text
         val sampledBg = sampleBoxBackgroundColor(
@@ -432,7 +481,7 @@ fun PdfEditorScreen(
           bottomNorm = hitBlock.bottomNorm,
           value = TextFieldValue(text = text, selection = TextRange(text.length)),
           fontSizeSp = hitBlock.fontSizePt.coerceIn(9f, 36f),
-          font = if (text.any { it.code > 126 }) EditorFont.BENGALI else selectedFont,
+          font = if (text.isEmpty() || text.any { it.code > 126 }) EditorFont.BENGALI else selectedFont,
           color = defaultInk,
           backgroundColor = sampledBg,
         )
@@ -440,15 +489,17 @@ fun PdfEditorScreen(
       }
     }
 
-    // 3. Otherwise open a new compact inline text cursor box right at the tapped coordinate
+    // 3. Otherwise open a new compact inline text cursor box centered vertically at the tapped spot
+    val boxTop = (ny - 0.014f).coerceIn(0.01f, 0.92f)
+    val boxLeft = (nx - 0.01f).coerceIn(0.01f, 0.85f)
     inlineEdit = InlineEditSession(
       sessionKey = UUID.randomUUID().toString(),
       existingActionId = null,
       isReplaceBox = false,
-      leftNorm = nx.coerceIn(0.02f, 0.85f),
-      topNorm = ny.coerceIn(0.02f, 0.92f),
-      rightNorm = (nx + 0.20f).coerceAtMost(0.98f),
-      bottomNorm = (ny + 0.035f).coerceAtMost(0.98f),
+      leftNorm = boxLeft,
+      topNorm = boxTop,
+      rightNorm = (boxLeft + 0.20f).coerceAtMost(0.98f),
+      bottomNorm = (boxTop + 0.032f).coerceAtMost(0.98f),
       value = TextFieldValue(text = "", selection = TextRange(0)),
       fontSizeSp = selectedFontSize,
       font = selectedFont,
@@ -925,7 +976,7 @@ fun PdfEditorScreen(
                           size = Size(w, h),
                         )
                         drawRect(
-                          color = Color(0xFF155EEF).copy(alpha = 0.30f),
+                          color = Color(0xFF155EEF).copy(alpha = 0.42f),
                           topLeft = Offset(l, t),
                           size = Size(w, h),
                           style = Stroke(width = 1f, pathEffect = dashEffect),
@@ -1084,8 +1135,7 @@ fun PdfEditorScreen(
                           color = Color.Transparent,
                           shape = RoundedCornerShape(2.dp),
                         )
-                        .border(1.dp, Color(0xFF155EEF).copy(alpha = 0.85f), RoundedCornerShape(2.dp))
-                        .padding(horizontal = 2.dp, vertical = 1.dp),
+                        .border(1.dp, Color(0xFF155EEF).copy(alpha = 0.85f), RoundedCornerShape(2.dp)),
                     ) {
                       BasicTextField(
                         value = session.value,
@@ -1099,6 +1149,19 @@ fun PdfEditorScreen(
                           fontWeight = FontWeight.Normal,
                         ),
                         cursorBrush = SolidColor(Color(0xFF155EEF)),
+                        decorationBox = { innerTextField ->
+                          Box {
+                            if (session.isReplaceBox && session.value.text.isEmpty()) {
+                              Text(
+                                text = strings.textContentHint,
+                                color = Color(0xFF155EEF).copy(alpha = 0.45f),
+                                fontSize = (session.fontSizeSp * fontScale * 0.85f).sp,
+                                maxLines = 1,
+                              )
+                            }
+                            innerTextField()
+                          }
+                        },
                         modifier = Modifier
                           .widthIn(min = origWidthDp, max = maxRemainingDp)
                           .focusRequester(inlineFocusRequester)
@@ -1285,13 +1348,6 @@ fun PdfEditorScreen(
                         OcrLanguageChoice.ENGLISH
                       }
                       editorOcrLang = next
-                      currentRenderedBmp?.let { bmp ->
-                        scope.launch {
-                          isScanningImageText = true
-                          pageTextBlocks = container.ocrEngine.detectPageTextBlocks(bmp, currentPage, next)
-                          isScanningImageText = false
-                        }
-                      }
                     },
                     label = {
                       Text(

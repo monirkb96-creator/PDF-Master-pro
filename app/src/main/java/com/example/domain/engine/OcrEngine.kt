@@ -7,6 +7,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import com.example.R
+import com.example.core.util.BitmapPatchUtils
 import com.example.domain.model.OcrLanguageChoice
 import com.example.domain.model.PdfTextBlock
 import com.google.mlkit.vision.common.InputImage
@@ -27,6 +28,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.max
+import kotlin.math.min
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -145,14 +148,65 @@ class OcrEngine(
     bitmap: Bitmap,
     pageIndex: Int,
     language: OcrLanguageChoice = OcrLanguageChoice.ENGLISH,
+  ): List<PdfTextBlock> = detectHybridTextBlocks(
+    bitmap = bitmap,
+    pageIndex = pageIndex,
+    language = language,
+    existingVectorBlocks = emptyList(),
+  )
+
+  suspend fun detectHybridTextBlocks(
+    bitmap: Bitmap,
+    pageIndex: Int,
+    language: OcrLanguageChoice = OcrLanguageChoice.ENGLISH,
+    existingVectorBlocks: List<PdfTextBlock> = emptyList(),
   ): List<PdfTextBlock> = withContext(Dispatchers.IO) {
-    runCatching {
-      if (language == OcrLanguageChoice.BANGLA && isTesseractModelAvailable(OcrLanguageChoice.BANGLA)) {
-        detectBlocksWithTesseract(bitmap, pageIndex, language.code)
-      } else {
-        detectBlocksWithMlKit(bitmap, pageIndex)
+    val merged = existingVectorBlocks.toMutableList()
+
+    fun overlapsAny(candidate: PdfTextBlock, list: List<PdfTextBlock>): Boolean {
+      val candArea = ((candidate.rightNorm - candidate.leftNorm) * (candidate.bottomNorm - candidate.topNorm))
+        .coerceAtLeast(1e-6f)
+      for (existing in list) {
+        val il = max(candidate.leftNorm, existing.leftNorm)
+        val it = max(candidate.topNorm, existing.topNorm)
+        val ir = min(candidate.rightNorm, existing.rightNorm)
+        val ib = min(candidate.bottomNorm, existing.bottomNorm)
+        if (ir > il && ib > it) {
+          val interArea = (ir - il) * (ib - it)
+          val existArea = ((existing.rightNorm - existing.leftNorm) * (existing.bottomNorm - existing.topNorm))
+            .coerceAtLeast(1e-6f)
+          if (interArea / min(candArea, existArea) >= 0.30f) {
+            return true
+          }
+        }
       }
-    }.getOrDefault(emptyList())
+      return false
+    }
+
+    // 1. Run Bangla Tesseract if installed (provides pre-filled Bangla characters when model exists)
+    if (isTesseractModelAvailable(OcrLanguageChoice.BANGLA)) {
+      val bnBlocks = runCatching { detectBlocksWithTesseract(bitmap, pageIndex, OcrLanguageChoice.BANGLA.code) }
+        .getOrDefault(emptyList())
+      for (blk in bnBlocks) {
+        if (!overlapsAny(blk, merged)) merged.add(blk)
+      }
+    }
+
+    // 2. Run ML Kit Latin OCR for scanned English PDFs or English image sections
+    val mlKitBlocks = runCatching { detectBlocksWithMlKit(bitmap, pageIndex) }
+      .getOrDefault(emptyList())
+    for (blk in mlKitBlocks) {
+      if (!overlapsAny(blk, merged)) merged.add(blk)
+    }
+
+    // 3. Offline visual dark-ink line/phrase detector for Bangla vector curves, image glyphs, or mixed forms
+    val visualBlocks = runCatching { BitmapPatchUtils.detectVisualTextLines(bitmap, pageIndex) }
+      .getOrDefault(emptyList())
+    for (blk in visualBlocks) {
+      if (!overlapsAny(blk, merged)) merged.add(blk)
+    }
+
+    merged
   }
 
   private suspend fun detectBlocksWithMlKit(bitmap: Bitmap, pageIndex: Int): List<PdfTextBlock> =

@@ -353,4 +353,103 @@ class PdfEngineRobolectricTest {
     pbmp.recycle()
     bmp.recycle()
   }
+
+  @Test
+  fun `detectVisualTextLines and detectInkPhraseAt segment columns accurately and ignore watermarks and barcodes`() {
+    val w = 750
+    val h = 1060
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    bmp.eraseColor(Color.WHITE)
+
+    // Pastel green watermark circle/band across the center (must NOT be detected as text)
+    val watermarkGreen = Color.rgb(180, 212, 195)
+    for (y in 320..680) {
+      for (x in 150..600) {
+        bmp.setPixel(x, y, watermarkGreen)
+      }
+    }
+
+    // Barcode on top-right (dense full-height vertical bars - should be filtered out)
+    val darkInk = Color.rgb(18, 22, 28)
+    for (x in 520..700 step 4) {
+      for (bx in x..(x + 1)) {
+        for (y in 60..92) {
+          bmp.setPixel(bx, y, darkInk)
+        }
+      }
+    }
+
+    // Row 1: Left label (60..120), Middle Bangla value (190..310), Right English value (520..650)
+    fun drawWordBlob(x0: Int, x1: Int, y0: Int, y1: Int) {
+      for (y in y0..y1) {
+        for (x in x0..x1) {
+          if (((x + y) % 3) != 0) bmp.setPixel(x, y, darkInk)
+        }
+      }
+    }
+    drawWordBlob(60, 115, 360, 376)   // "নাম"
+    drawWordBlob(195, 315, 360, 376)  // "পল্লবী বড়ুয়া" over watermark
+    drawWordBlob(520, 645, 360, 376)  // "Pollobi Barua" over watermark
+
+    // Row 2: Second row well separated vertically
+    drawWordBlob(60, 115, 420, 436)   // "মাতা"
+    drawWordBlob(195, 325, 420, 436)  // "কলি রাণী বড়ুয়া"
+
+    val blocks = BitmapPatchUtils.detectVisualTextLines(bmp, 0)
+    // Expect the 5 word phrases, and NOT the barcode or watermark background
+    assertEquals("Expected 5 distinct column phrase blocks, got ${blocks.map { "${it.leftNorm}..${it.rightNorm}@${it.topNorm}" }}", 5, blocks.size)
+
+    val row1Mid = blocks.firstOrNull { (250f / w) in it.leftNorm..it.rightNorm && (368f / h) in it.topNorm..it.bottomNorm }
+    assertTrue("Expected middle Bangla phrase to have its own tight block", row1Mid != null)
+    assertTrue("Middle block should not merge into right English column", row1Mid!!.rightNorm < 0.45f)
+
+    // Verify tap-ink detection hits the exact tapped phrase
+    val tapped = BitmapPatchUtils.detectInkPhraseAt(bmp, 250f / w, 368f / h, 0)
+    assertTrue("Expected detectInkPhraseAt to find ink at tapped phrase", tapped != null)
+    assertTrue((250f / w) in tapped!!.leftNorm..tapped.rightNorm)
+    assertTrue((368f / h) in tapped.topNorm..tapped.bottomNorm)
+
+    // Verify tapping blank pastel watermark returns null
+    val blankTap = BitmapPatchUtils.detectInkPhraseAt(bmp, 400f / w, 520f / h, 0)
+    assertTrue("Expected blank watermark tap to return null", blankTap == null)
+    bmp.recycle()
+  }
+
+  @Test
+  fun `bangla replacement over graphics watermark succeeds cleanly`() = runBlocking {
+    val src = tempFolder.newFile("cert_bangla_graphics.pdf")
+    PDDocument().use { doc ->
+      val page = PDPage(PDRectangle.A4)
+      doc.addPage(page)
+      PDPageContentStream(doc, page).use { cs ->
+        // Green watermark patch
+        cs.setNonStrokingColor(175, 212, 190)
+        cs.addRect(120f, 520f, 240f, 80f)
+        cs.fill()
+        // Simulated vector-drawn Bangla glyphs as dark rectangles
+        cs.setNonStrokingColor(15, 23, 42)
+        cs.addRect(150f, 555f, 70f, 10f)
+        cs.fill()
+      }
+      doc.save(src)
+    }
+
+    val out = tempFolder.newFile("cert_bangla_edited.pdf")
+    val action = PdfEditAction.RedactAndReplace(
+      id = "r_bn",
+      pageIndex = 0,
+      leftNorm = 148f / PDRectangle.A4.width,
+      topNorm = (PDRectangle.A4.height - 568f) / PDRectangle.A4.height,
+      rightNorm = 224f / PDRectangle.A4.width,
+      bottomNorm = (PDRectangle.A4.height - 552f) / PDRectangle.A4.height,
+      replacementText = "মনিরুল ইসলাম",
+      fontSizeSp = 11f,
+      textColorArgb = Color.BLACK,
+      font = EditorFont.BENGALI,
+      preserveBackground = true,
+    )
+    val res = pdfEngine.applyEdits(src, out, listOf(action))
+    assertTrue(res.exceptionOrNull()?.stackTraceToString() ?: "failed", res.isSuccess)
+    assertTrue(out.exists() && out.length() > 0L)
+  }
 }
