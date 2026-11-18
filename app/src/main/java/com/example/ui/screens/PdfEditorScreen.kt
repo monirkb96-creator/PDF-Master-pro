@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,12 +18,16 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -30,6 +35,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,9 +57,11 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.HideSource
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Save
@@ -65,12 +74,13 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -154,7 +164,7 @@ private data class InlineEditSession(
   val backgroundColor: Color = Color.White,
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun PdfEditorScreen(
   docId: Long,
@@ -168,19 +178,21 @@ fun PdfEditorScreen(
   val scope = rememberCoroutineScope()
   val keyboardController = LocalSoftwareKeyboardController.current
   val inlineFocusRequester = remember { FocusRequester() }
+  val bringIntoViewRequester = remember { BringIntoViewRequester() }
 
   var doc by remember { mutableStateOf<PdfDocumentEntity?>(null) }
   var pageCount by remember { mutableIntStateOf(0) }
   var currentPage by remember { mutableIntStateOf(0) }
   var activeTool by remember { mutableStateOf(EditorTool.EDIT_TEXT) }
   var selectedFont by remember { mutableStateOf(EditorFont.HELVETICA) }
-  var selectedFontSize by remember { mutableFloatStateOf(14f) }
+  var selectedFontSize by remember { mutableFloatStateOf(12f) }
   var selectedColor by remember { mutableStateOf(Color(0xFF0F172A)) }
   var selectedShape by remember { mutableStateOf(ShapeKind.RECTANGLE) }
   var strokeWidth by remember { mutableFloatStateOf(3f) }
   var editorZoom by remember { mutableFloatStateOf(1f) }
   var headerFooter by remember { mutableStateOf(HeaderFooterConfig()) }
   var showHeaderFooterDialog by remember { mutableStateOf(false) }
+  var showSaveMenu by remember { mutableStateOf(false) }
 
   // Detected selectable text blocks on the current page (vector PDF text or OCR on image PDFs)
   var pageTextBlocks by remember { mutableStateOf<List<PdfTextBlock>>(emptyList()) }
@@ -239,10 +251,14 @@ fun PdfEditorScreen(
 
   LaunchedEffect(inlineEdit?.sessionKey) {
     if (inlineEdit != null) {
-      delay(60)
+      delay(80)
       runCatching {
         inlineFocusRequester.requestFocus()
         keyboardController?.show()
+      }
+      delay(220)
+      runCatching {
+        bringIntoViewRequester.bringIntoView()
       }
     }
   }
@@ -327,6 +343,7 @@ fun PdfEditorScreen(
 
     if (hitPending is PdfEditAction.RedactAndReplace) {
       val text = hitPending.replacementText
+      if (editorZoom < 1.55f) editorZoom = 1.65f
       inlineEdit = InlineEditSession(
         sessionKey = UUID.randomUUID().toString(),
         existingActionId = hitPending.id,
@@ -346,13 +363,14 @@ fun PdfEditorScreen(
 
     if (hitPending is PdfEditAction.AddText) {
       val text = hitPending.text
+      if (editorZoom < 1.55f) editorZoom = 1.65f
       inlineEdit = InlineEditSession(
         sessionKey = UUID.randomUUID().toString(),
         existingActionId = hitPending.id,
         isReplaceBox = false,
         leftNorm = hitPending.xNorm,
         topNorm = (hitPending.yNorm - 0.022f).coerceIn(0f, 0.94f),
-        rightNorm = (hitPending.xNorm + 0.35f).coerceAtMost(0.98f),
+        rightNorm = (hitPending.xNorm + 0.25f).coerceAtMost(0.98f),
         bottomNorm = (hitPending.yNorm + 0.02f).coerceAtMost(0.99f),
         value = TextFieldValue(text = text, selection = TextRange(text.length)),
         fontSizeSp = hitPending.fontSizeSp,
@@ -379,6 +397,10 @@ fun PdfEditorScreen(
         )
         val lum = (0.299f * sampledBg.red + 0.587f * sampledBg.green + 0.114f * sampledBg.blue)
         val defaultInk = if (lum < 0.45f) Color.White else selectedColor
+        // Gently zoom in on small table text so user can clearly see cursor & edits above keyboard
+        if (hitBlock.fontSizePt <= 14f && editorZoom < 1.55f) {
+          editorZoom = 1.65f
+        }
         inlineEdit = InlineEditSession(
           sessionKey = UUID.randomUUID().toString(),
           existingActionId = null,
@@ -388,7 +410,7 @@ fun PdfEditorScreen(
           rightNorm = hitBlock.rightNorm,
           bottomNorm = hitBlock.bottomNorm,
           value = TextFieldValue(text = text, selection = TextRange(text.length)),
-          fontSizeSp = hitBlock.fontSizePt.coerceIn(10f, 36f),
+          fontSizeSp = hitBlock.fontSizePt.coerceIn(9f, 36f),
           font = if (text.any { it.code > 126 }) EditorFont.BENGALI else selectedFont,
           color = defaultInk,
           backgroundColor = sampledBg,
@@ -397,15 +419,16 @@ fun PdfEditorScreen(
       }
     }
 
-    // 3. Otherwise open a new inline text cursor box right at the tapped coordinate
+    // 3. Otherwise open a new compact inline text cursor box right at the tapped coordinate
+    if (editorZoom < 1.35f) editorZoom = 1.45f
     inlineEdit = InlineEditSession(
       sessionKey = UUID.randomUUID().toString(),
       existingActionId = null,
       isReplaceBox = false,
       leftNorm = nx.coerceIn(0.02f, 0.85f),
       topNorm = ny.coerceIn(0.02f, 0.92f),
-      rightNorm = (nx + 0.35f).coerceAtMost(0.98f),
-      bottomNorm = (ny + 0.04f).coerceAtMost(0.98f),
+      rightNorm = (nx + 0.20f).coerceAtMost(0.98f),
+      bottomNorm = (ny + 0.035f).coerceAtMost(0.98f),
       value = TextFieldValue(text = "", selection = TextRange(0)),
       fontSizeSp = selectedFontSize,
       font = selectedFont,
@@ -501,6 +524,7 @@ fun PdfEditorScreen(
   )
 
   Scaffold(
+    contentWindowInsets = WindowInsets(0, 0, 0, 0),
     topBar = {
       TopAppBar(
         title = { Text(strings.toolEditPdf, maxLines = 1) },
@@ -544,23 +568,60 @@ fun PdfEditorScreen(
           ) {
             Icon(Icons.Filled.Save, contentDescription = strings.saveOverwrite)
           }
-          IconButton(
-            onClick = { exportLauncher.launch("edited_${doc?.displayName ?: "document.pdf"}") },
-            modifier = Modifier.testTag("editor_download_btn"),
-          ) {
-            Icon(Icons.Filled.SaveAlt, contentDescription = strings.saveAs)
+          Box {
+            IconButton(
+              onClick = { showSaveMenu = true },
+              modifier = Modifier.testTag("editor_more_save_btn"),
+            ) {
+              Icon(Icons.Filled.MoreVert, contentDescription = strings.saveAs)
+            }
+            DropdownMenu(
+              expanded = showSaveMenu,
+              onDismissRequest = { showSaveMenu = false },
+            ) {
+              DropdownMenuItem(
+                text = { Text(strings.saveOverwrite) },
+                leadingIcon = { Icon(Icons.Filled.Save, contentDescription = null) },
+                onClick = {
+                  showSaveMenu = false
+                  saveToVault(overwrite = true)
+                },
+              )
+              DropdownMenuItem(
+                text = { Text(strings.saveCopy) },
+                leadingIcon = { Icon(Icons.Filled.Check, contentDescription = null) },
+                onClick = {
+                  showSaveMenu = false
+                  saveToVault(overwrite = false)
+                },
+              )
+              DropdownMenuItem(
+                text = { Text(strings.saveAs) },
+                leadingIcon = { Icon(Icons.Filled.SaveAlt, contentDescription = null) },
+                onClick = {
+                  showSaveMenu = false
+                  exportLauncher.launch("edited_${doc?.displayName ?: "document.pdf"}")
+                },
+              )
+            }
           }
         },
       )
     },
   ) { innerPadding ->
-    Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+    Box(
+      modifier = Modifier
+        .fillMaxSize()
+        .padding(innerPadding)
+        .imePadding(),
+    ) {
       Column(modifier = Modifier.fillMaxSize()) {
-        // Tool Palette Row
-        Surface(tonalElevation = 2.dp) {
+        // 1. Sleek Tool Palette Strip
+        Surface(tonalElevation = 1.dp) {
           LazyRow(
-            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
           ) {
             val tools = listOf(
               Triple(EditorTool.EDIT_TEXT, strings.editorToolEditText, Icons.Filled.Edit),
@@ -588,117 +649,98 @@ fun PdfEditorScreen(
                     else -> activeTool = tool
                   }
                 },
-                label = { Text(label) },
-                leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp)) },
-                modifier = Modifier.testTag("editor_tool_${tool.name.lowercase()}"),
+                label = { Text(label, maxLines = 1, style = MaterialTheme.typography.labelMedium) },
+                leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(15.dp)) },
+                modifier = Modifier.height(32.dp).testTag("editor_tool_${tool.name.lowercase()}"),
               )
             }
           }
         }
 
-        // Contextual Properties + Live Inline Typing Controls Strip
-        Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)) {
-          Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
-            val currentSession = inlineEdit
-            if (currentSession != null) {
-              // Live inline editing toolbar (Size -, +, Color, Done, Cancel)
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-              ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                  IconButton(
-                    onClick = {
-                      val nextSize = (currentSession.fontSizeSp - 2f).coerceAtLeast(8f)
-                      selectedFontSize = nextSize
-                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
-                    },
-                    modifier = Modifier.size(32.dp),
-                  ) {
-                    Icon(Icons.Filled.Remove, contentDescription = "Smaller text", modifier = Modifier.size(18.dp))
-                  }
-                  Text("${currentSession.fontSizeSp.toInt()}pt", style = MaterialTheme.typography.labelMedium)
-                  IconButton(
-                    onClick = {
-                      val nextSize = (currentSession.fontSizeSp + 2f).coerceAtMost(42f)
-                      selectedFontSize = nextSize
-                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
-                    },
-                    modifier = Modifier.size(32.dp),
-                  ) {
-                    Icon(Icons.Filled.Add, contentDescription = "Larger text", modifier = Modifier.size(18.dp))
-                  }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                  colorPalette.forEach { c ->
-                    Box(
-                      modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(c)
-                        .border(
-                          width = if (currentSession.color == c) 2.5.dp else 1.dp,
-                          color = if (currentSession.color == c) MaterialTheme.colorScheme.onSurface else Color.White,
-                          shape = CircleShape,
-                        )
-                        .clickable {
-                          selectedColor = c
-                          inlineEdit = currentSession.copy(color = c)
-                        },
-                    )
-                  }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                  IconButton(
-                    onClick = {
-                      inlineEdit = null
-                      keyboardController?.hide()
-                    },
-                    modifier = Modifier.size(34.dp),
-                  ) {
-                    Icon(Icons.Filled.Close, contentDescription = strings.cancel, tint = MaterialTheme.colorScheme.error)
-                  }
-                  Button(
-                    onClick = { commitInlineEdit() },
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                    modifier = Modifier.testTag("editor_inline_done_btn"),
-                  ) {
-                    Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(strings.doneLabel, style = MaterialTheme.typography.labelMedium)
-                  }
+        // 2. Single-Row Sleek Contextual / Live Typing Bar (Scrollable, NEVER stretches vertically!)
+        Surface(color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)) {
+          val currentSession = inlineEdit
+          if (currentSession != null) {
+            LazyRow(
+              modifier = Modifier.fillMaxWidth(),
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              item {
+                Button(
+                  onClick = { commitInlineEdit() },
+                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                  modifier = Modifier.height(32.dp).testTag("editor_inline_done_btn"),
+                ) {
+                  Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(15.dp))
+                  Spacer(Modifier.width(4.dp))
+                  Text(strings.doneLabel, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium)
                 }
               }
-              Text(
-                text = strings.inlineEditingHint,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-              )
-            } else {
-              val helperText = when {
-                isScanningImageText -> strings.scanningPhotoTextHint
-                activeTool == EditorTool.EDIT_TEXT && pageTextBlocks.isNotEmpty() -> strings.tapTextToEditHint
-                activeTool == EditorTool.EDIT_TEXT -> strings.noSelectableTextHint
-                activeTool == EditorTool.REDACT -> strings.redactNotice
-                else -> strings.tapPageToPlace
-              }
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-              ) {
-                Text(
-                  text = helperText,
-                  style = MaterialTheme.typography.labelSmall,
-                  color = if (activeTool == EditorTool.EDIT_TEXT || activeTool == EditorTool.REDACT) {
-                    MaterialTheme.colorScheme.primary
-                  } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
+              item {
+                IconButton(
+                  onClick = {
+                    inlineEdit = null
+                    keyboardController?.hide()
                   },
-                  modifier = Modifier.weight(1f),
+                  modifier = Modifier.size(32.dp),
+                ) {
+                  Icon(Icons.Filled.Close, contentDescription = strings.cancel, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
+                }
+              }
+              item {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                  IconButton(
+                    onClick = {
+                      val nextSize = (currentSession.fontSizeSp - 1.5f).coerceAtLeast(7f)
+                      selectedFontSize = nextSize
+                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
+                    },
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.Remove, contentDescription = "Smaller text", modifier = Modifier.size(16.dp))
+                  }
+                  Text("${currentSession.fontSizeSp.toInt()}pt", style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                  IconButton(
+                    onClick = {
+                      val nextSize = (currentSession.fontSizeSp + 1.5f).coerceAtMost(42f)
+                      selectedFontSize = nextSize
+                      inlineEdit = currentSession.copy(fontSizeSp = nextSize)
+                    },
+                    modifier = Modifier.size(30.dp),
+                  ) {
+                    Icon(Icons.Filled.Add, contentDescription = "Larger text", modifier = Modifier.size(16.dp))
+                  }
+                }
+              }
+              items(colorPalette) { c ->
+                Box(
+                  modifier = Modifier
+                    .size(22.dp)
+                    .clip(CircleShape)
+                    .background(c)
+                    .border(
+                      width = if (currentSession.color == c) 2.5.dp else 1.dp,
+                      color = if (currentSession.color == c) MaterialTheme.colorScheme.onSurface else Color.White,
+                      shape = CircleShape,
+                    )
+                    .clickable {
+                      selectedColor = c
+                      inlineEdit = currentSession.copy(color = c)
+                    },
                 )
-                if (activeTool == EditorTool.EDIT_TEXT) {
+              }
+            }
+          } else {
+            LazyRow(
+              modifier = Modifier.fillMaxWidth(),
+              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              if (activeTool == EditorTool.EDIT_TEXT) {
+                item {
                   FilterChip(
                     selected = editorOcrLang == OcrLanguageChoice.BANGLA,
                     onClick = {
@@ -724,98 +766,86 @@ fun PdfEditorScreen(
                     label = {
                       Text(
                         if (editorOcrLang == OcrLanguageChoice.BANGLA) "OCR: বাংলা" else "OCR: EN",
+                        maxLines = 1,
                         style = MaterialTheme.typography.labelSmall,
                       )
                     },
                     leadingIcon = {
                       Icon(Icons.Filled.DocumentScanner, contentDescription = null, modifier = Modifier.size(14.dp))
                     },
-                    modifier = Modifier.padding(start = 6.dp),
+                    modifier = Modifier.height(30.dp),
                   )
                 }
               }
-              Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-              ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                  colorPalette.forEach { c ->
-                    Box(
-                      modifier = Modifier
-                        .size(22.dp)
-                        .clip(CircleShape)
-                        .background(c)
-                        .border(
-                          width = if (selectedColor == c) 2.5.dp else 1.dp,
-                          color = if (selectedColor == c) MaterialTheme.colorScheme.onSurface else Color.White,
-                          shape = CircleShape,
-                        )
-                        .clickable { selectedColor = c },
-                    )
-                  }
-                }
-                if (activeTool == EditorTool.SHAPE) {
-                  Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    ShapeKind.entries.forEach { sk ->
-                      FilterChip(
-                        selected = selectedShape == sk,
-                        onClick = { selectedShape = sk },
-                        label = {
-                          Text(
-                            when (sk) {
-                              ShapeKind.RECTANGLE -> "Rect"
-                              ShapeKind.CIRCLE -> "Oval"
-                              ShapeKind.LINE -> "Line"
-                              ShapeKind.ARROW -> "Arrow"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                          )
+              if (activeTool == EditorTool.SHAPE) {
+                items(ShapeKind.entries) { sk ->
+                  FilterChip(
+                    selected = selectedShape == sk,
+                    onClick = { selectedShape = sk },
+                    label = {
+                      Text(
+                        when (sk) {
+                          ShapeKind.RECTANGLE -> "Rect"
+                          ShapeKind.CIRCLE -> "Oval"
+                          ShapeKind.LINE -> "Line"
+                          ShapeKind.ARROW -> "Arrow"
                         },
+                        maxLines = 1,
+                        style = MaterialTheme.typography.labelSmall,
                       )
-                    }
-                  }
-                } else {
-                  // Editor Zoom controls for precision tapping on mobile
-                  Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                      onClick = { editorZoom = (editorZoom - 0.35f).coerceAtLeast(1f) },
-                      enabled = editorZoom > 1.01f,
-                      modifier = Modifier.size(30.dp),
-                    ) {
-                      Icon(Icons.Filled.ZoomOut, contentDescription = strings.zoomOut, modifier = Modifier.size(18.dp))
-                    }
-                    Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
-                    IconButton(
-                      onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(2.4f) },
-                      enabled = editorZoom < 2.39f,
-                      modifier = Modifier.size(30.dp),
-                    ) {
-                      Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(18.dp))
-                    }
-                  }
+                    },
+                    modifier = Modifier.height(30.dp),
+                  )
                 }
+              }
+              items(colorPalette) { c ->
+                Box(
+                  modifier = Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(c)
+                    .border(
+                      width = if (selectedColor == c) 2.5.dp else 1.dp,
+                      color = if (selectedColor == c) MaterialTheme.colorScheme.onSurface else Color.White,
+                      shape = CircleShape,
+                    )
+                    .clickable { selectedColor = c },
+                )
+              }
+              item {
+                val tip = when {
+                  isScanningImageText -> strings.scanningPhotoTextHint
+                  activeTool == EditorTool.EDIT_TEXT && pageTextBlocks.isNotEmpty() -> strings.tapTextToEditHint
+                  activeTool == EditorTool.EDIT_TEXT -> strings.noSelectableTextHint
+                  activeTool == EditorTool.REDACT -> strings.redactNotice
+                  else -> strings.tapPageToPlace
+                }
+                Text(
+                  text = tip,
+                  style = MaterialTheme.typography.labelSmall,
+                  color = MaterialTheme.colorScheme.primary,
+                  maxLines = 1,
+                )
               }
             }
           }
         }
 
-        // Interactive Zoomable & Scrollable Page Canvas
+        // 3. Full-Bleed Zoomable & Keyboard-Aware PDF Workspace
         BoxWithConstraints(
           modifier = Modifier
             .weight(1f)
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-            .padding(8.dp),
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
         ) {
-          val viewportWidth = maxWidth - 16.dp
+          val viewportWidth = maxWidth - 12.dp
           val hScroll = rememberScrollState()
           val vScroll = rememberScrollState()
           val f = doc?.let { File(it.filePath) }
 
           if (f != null && f.exists() && pageCount > 0) {
             val pageBmp by produceState<Bitmap?>(initialValue = null, f.absolutePath, currentPage, refreshTick) {
-              val rendered = container.pdfRendererHelper.renderPage(f, currentPage, targetWidthPx = 1400)
+              val rendered = container.pdfRendererHelper.renderPage(f, currentPage, targetWidthPx = 1500)
               currentRenderedBmp = rendered
               value = rendered
             }
@@ -823,21 +853,22 @@ fun PdfEditorScreen(
             if (bmp != null) {
               val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1)
               val zoomedWidth = (viewportWidth * editorZoom).coerceAtLeast(240.dp)
-              val fontScale = (zoomedWidth.value / 595f).coerceIn(0.45f, 2.5f)
+              val fontScale = (zoomedWidth.value / 595f).coerceIn(0.42f, 3.0f)
               val textMeasurer = rememberTextMeasurer()
 
               Box(
                 modifier = Modifier
                   .fillMaxSize()
                   .horizontalScroll(hScroll)
-                  .verticalScroll(vScroll),
+                  .verticalScroll(vScroll)
+                  .padding(6.dp),
                 contentAlignment = Alignment.TopCenter,
               ) {
                 BoxWithConstraints(
                   modifier = Modifier
                     .width(zoomedWidth)
                     .aspectRatio(aspect)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(4.dp))
                     .background(Color.White)
                     .pointerInput(activeTool, currentPage, selectedShape, selectedColor, pendingImagePath, pageTextBlocks, inlineEdit?.sessionKey) {
                       detectTapGestures { offset ->
@@ -1002,22 +1033,22 @@ fun PdfEditorScreen(
                   Canvas(modifier = Modifier.fillMaxSize()) {
                     // Subtle dashed outlines over clickable existing PDF text blocks when EDIT_TEXT is active
                     if (activeTool == EditorTool.EDIT_TEXT) {
-                      val dashEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 5f), 0f)
+                      val dashEffect = PathEffect.dashPathEffect(floatArrayOf(5f, 4f), 0f)
                       for (blk in pageTextBlocks) {
                         val l = blk.leftNorm * size.width
                         val t = blk.topNorm * size.height
-                        val w = ((blk.rightNorm - blk.leftNorm) * size.width).coerceAtLeast(16f)
-                        val h = ((blk.bottomNorm - blk.topNorm) * size.height).coerceAtLeast(12f)
+                        val w = ((blk.rightNorm - blk.leftNorm) * size.width).coerceAtLeast(14f)
+                        val h = ((blk.bottomNorm - blk.topNorm) * size.height).coerceAtLeast(10f)
                         drawRect(
-                          color = Color(0xFF155EEF).copy(alpha = 0.06f),
+                          color = Color(0xFF155EEF).copy(alpha = 0.05f),
                           topLeft = Offset(l, t),
                           size = Size(w, h),
                         )
                         drawRect(
-                          color = Color(0xFF155EEF).copy(alpha = 0.35f),
+                          color = Color(0xFF155EEF).copy(alpha = 0.30f),
                           topLeft = Offset(l, t),
                           size = Size(w, h),
-                          style = Stroke(width = 1.2f, pathEffect = dashEffect),
+                          style = Stroke(width = 1f, pathEffect = dashEffect),
                         )
                       }
                     }
@@ -1043,8 +1074,8 @@ fun PdfEditorScreen(
                           val h = abs(act.bottomNorm - act.topNorm) * size.height
                           drawRect(
                             Color(act.backgroundArgb),
-                            topLeft = Offset(l - 2f, t - 2f),
-                            size = Size(w.coerceAtLeast(18f) + 4f, h.coerceAtLeast(14f) + 4f),
+                            topLeft = Offset(l - 1f, t - 1f),
+                            size = Size(w.coerceAtLeast(14f) + 2f, h.coerceAtLeast(10f) + 2f),
                           )
                           if (act.replacementText.isNotBlank()) {
                             val res = textMeasurer.measure(
@@ -1117,34 +1148,35 @@ fun PdfEditorScreen(
                     }
                   }
 
-                  // Live Inline Editable Text Box directly on top of the PDF page with blinking cursor (|)
+                  // Live Tightly-Fitted Inline Editable Text Box with blinking cursor (|)
                   val session = inlineEdit
                   if (session != null) {
                     val pageWidthPx = constraints.maxWidth.toFloat().coerceAtLeast(1f)
                     val pageHeightPx = constraints.maxHeight.toFloat().coerceAtLeast(1f)
                     val boxLeftPx = (session.leftNorm * pageWidthPx).roundToInt().coerceAtLeast(0)
                     val boxTopPx = (session.topNorm * pageHeightPx).roundToInt().coerceAtLeast(0)
-                    val minBoxWidthDp = max(
-                      90f,
-                      ((session.rightNorm - session.leftNorm) * zoomedWidth.value),
-                    ).dp
+                    val origWidthDp = ((session.rightNorm - session.leftNorm) * zoomedWidth.value).coerceAtLeast(36f).dp
+                    val maxRemainingDp = (zoomedWidth * (1f - session.leftNorm) - 4.dp).coerceAtLeast(origWidthDp)
 
                     Box(
                       modifier = Modifier
                         .offset { IntOffset(boxLeftPx, boxTopPx) }
-                        .widthIn(min = minBoxWidthDp, max = (zoomedWidth - 8.dp).coerceAtLeast(120.dp))
+                        .bringIntoViewRequester(bringIntoViewRequester)
+                        .width(IntrinsicSize.Min)
+                        .widthIn(min = origWidthDp, max = maxRemainingDp)
                         .background(
-                          color = if (session.isReplaceBox) session.backgroundColor else Color.White.copy(alpha = 0.92f),
-                          shape = RoundedCornerShape(3.dp),
+                          color = if (session.isReplaceBox) session.backgroundColor else Color.White.copy(alpha = 0.94f),
+                          shape = RoundedCornerShape(2.dp),
                         )
-                        .border(1.5.dp, Color(0xFF155EEF), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 3.dp, vertical = 1.dp),
+                        .border(1.dp, Color(0xFF155EEF), RoundedCornerShape(2.dp))
+                        .padding(horizontal = 2.dp, vertical = 1.dp),
                     ) {
                       BasicTextField(
                         value = session.value,
                         onValueChange = { updated ->
                           inlineEdit = session.copy(value = updated)
                         },
+                        singleLine = true,
                         textStyle = TextStyle(
                           color = session.color,
                           fontSize = (session.fontSizeSp * fontScale).sp,
@@ -1152,7 +1184,7 @@ fun PdfEditorScreen(
                         ),
                         cursorBrush = SolidColor(Color(0xFF155EEF)),
                         modifier = Modifier
-                          .fillMaxWidth()
+                          .widthIn(min = origWidthDp, max = maxRemainingDp)
                           .focusRequester(inlineFocusRequester)
                           .testTag("editor_inline_text_input"),
                       )
@@ -1168,12 +1200,13 @@ fun PdfEditorScreen(
           }
         }
 
-        // Bottom Page Switcher & Save Bar
-        Surface(tonalElevation = 3.dp) {
+        // 4. Ultra-Slim Bottom Page & Zoom Bar (40dp height)
+        Surface(tonalElevation = 2.dp) {
           Row(
             modifier = Modifier
               .fillMaxWidth()
-              .padding(horizontal = 12.dp, vertical = 8.dp),
+              .height(42.dp)
+              .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
           ) {
@@ -1184,28 +1217,46 @@ fun PdfEditorScreen(
                   if (currentPage > 0) currentPage--
                 },
                 enabled = currentPage > 0,
+                modifier = Modifier.size(34.dp),
               ) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null)
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, modifier = Modifier.size(20.dp))
               }
-              Text("${currentPage + 1} / ${pageCount.coerceAtLeast(1)}", style = MaterialTheme.typography.labelLarge)
+              Text("${currentPage + 1} / ${pageCount.coerceAtLeast(1)}", style = MaterialTheme.typography.labelMedium)
               IconButton(
                 onClick = {
                   commitInlineEdit()
                   if (currentPage < pageCount - 1) currentPage++
                 },
                 enabled = currentPage < pageCount - 1,
+                modifier = Modifier.size(34.dp),
               ) {
-                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null)
+                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, modifier = Modifier.size(20.dp))
               }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-              OutlinedButton(onClick = { saveToVault(overwrite = false) }) {
-                Text(strings.saveCopy)
+
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+              IconButton(
+                onClick = { editorZoom = (editorZoom - 0.35f).coerceAtLeast(1f) },
+                enabled = editorZoom > 1.01f,
+                modifier = Modifier.size(34.dp),
+              ) {
+                Icon(Icons.Filled.ZoomOut, contentDescription = strings.zoomOut, modifier = Modifier.size(18.dp))
               }
-              Button(onClick = { saveToVault(overwrite = true) }) {
-                Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(strings.saveOverwrite)
+              Text("${(editorZoom * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+              IconButton(
+                onClick = { editorZoom = (editorZoom + 0.35f).coerceAtMost(3.0f) },
+                enabled = editorZoom < 2.99f,
+                modifier = Modifier.size(34.dp),
+              ) {
+                Icon(Icons.Filled.ZoomIn, contentDescription = strings.zoomIn, modifier = Modifier.size(18.dp))
+              }
+              if (editorZoom > 1.05f) {
+                IconButton(
+                  onClick = { editorZoom = 1f },
+                  modifier = Modifier.size(34.dp),
+                ) {
+                  Icon(Icons.Filled.FitScreen, contentDescription = strings.fitWidth, modifier = Modifier.size(18.dp))
+                }
               }
             }
           }
@@ -1377,7 +1428,6 @@ private fun sampleBoxBackgroundColor(
   samples.add(bmp.getPixel((x1 + 2).coerceAtMost(bmp.width - 1), midY))
 
   if (samples.isEmpty()) return Color.White
-  // Pick a bright representative perimeter pixel to avoid text ink bleeding into edges
   val sorted = samples.sortedBy { px ->
     val r = android.graphics.Color.red(px)
     val g = android.graphics.Color.green(px)
@@ -1387,4 +1437,3 @@ private fun sampleBoxBackgroundColor(
   val chosen = sorted[(sorted.size * 3) / 4]
   return Color(chosen)
 }
-
