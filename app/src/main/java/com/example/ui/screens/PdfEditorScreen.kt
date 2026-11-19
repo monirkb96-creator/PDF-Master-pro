@@ -519,7 +519,8 @@ fun PdfEditorScreen(
           }
           else -> hitBlock.fontFamily
         }
-        val snappedPt = ((hitBlock.fontSizePt * 2f).roundToInt() / 2f).coerceIn(7f, 36f)
+        val maxFontPt = (pageSizePt.second * 0.08f).coerceAtLeast(48f)
+        val snappedPt = ((hitBlock.fontSizePt * 2f).roundToInt() / 2f).coerceIn(7f, maxFontPt)
         inlineEdit = InlineEditSession(
           sessionKey = UUID.randomUUID().toString(),
           existingActionId = null,
@@ -811,7 +812,7 @@ fun PdfEditorScreen(
             if (bmp != null) {
               val aspect = bmp.width.toFloat() / bmp.height.coerceAtLeast(1)
               val zoomedWidth = (viewportWidth * editorZoom).coerceAtLeast(240.dp)
-              val ptToDp = (zoomedWidth.value / pageSizePt.first.coerceAtLeast(100f)).coerceIn(0.25f, 4.0f)
+              val ptToDp = (zoomedWidth.value / pageSizePt.first.coerceAtLeast(100f)).coerceIn(0.05f, 8.0f)
               fun pdfPtToSp(pt: Float): TextUnit = with(density) { (pt * ptToDp).dp.toSp() }
               val textMeasurer = rememberTextMeasurer()
               val bgPatchCache = remember(bmp) { mutableMapOf<String, BitmapPatchUtils.PatchResult?>() }
@@ -902,7 +903,7 @@ fun PdfEditorScreen(
                       }
                     }
                   }
-                  .then(if (editorZoom > 1.02f) Modifier.horizontalScroll(hScroll) else Modifier)
+                  .horizontalScroll(hScroll, enabled = editorZoom > 1.02f)
                   .verticalScroll(vScroll)
                   .padding(6.dp),
                 contentAlignment = Alignment.TopCenter,
@@ -1332,7 +1333,8 @@ fun PdfEditorScreen(
                   Text(sizeText, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                   IconButton(
                     onClick = {
-                      val nextSize = (currentSession.fontSizeSp + 0.5f).coerceAtMost(42f)
+                      val maxFontPt = (pageSizePt.second * 0.08f).coerceAtLeast(64f)
+                      val nextSize = (currentSession.fontSizeSp + 0.5f).coerceAtMost(maxFontPt)
                       selectedFontSize = nextSize
                       inlineEdit = currentSession.copy(fontSizeSp = nextSize)
                     },

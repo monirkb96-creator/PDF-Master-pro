@@ -527,14 +527,75 @@ class PdfEngineRobolectricTest {
     )
     assertTrue(patch != null)
     val pb = patch!!.bitmap
-    // Verify the interior and edge of the patch remain crisp white with zero dark smudge streak
+    // Verify untouched background pixels stay transparent and erased ink reconstructs to crisp white without ring-ink smudge
     for (y in 2 until pb.height - 2) {
       val px = pb.getPixel(pb.width / 2, y)
       assertTrue(
-        "Expected clean white patch without ring-ink smudge at y=$y, got rgb(${Color.red(px)},${Color.green(px)},${Color.blue(px)})",
-        Color.red(px) > 225 && Color.green(px) > 225 && Color.blue(px) > 225,
+        "Expected transparent or clean white patch without ring-ink smudge at y=$y, got argb(${Color.alpha(px)},${Color.red(px)},${Color.green(px)},${Color.blue(px)})",
+        Color.alpha(px) == 0 || (Color.red(px) > 225 && Color.green(px) > 225 && Color.blue(px) > 225),
       )
     }
+    pb.recycle()
+    bmp.recycle()
+  }
+
+  @Test
+  fun `clean background patch preserves pastel green and pink watermarks without white paper stamp`() {
+    val bmp = Bitmap.createBitmap(260, 120, Bitmap.Config.ARGB_8888)
+    bmp.eraseColor(Color.WHITE)
+    val greenWatermark = Color.rgb(168, 213, 186) // #A8D5BA curved birth-certificate watermark
+    val pinkWatermark = Color.rgb(244, 184, 184) // #F4B8B8 center watermark
+    val blackInk = Color.rgb(15, 15, 15)
+
+    // Left half of box sits over white paper + green watermark band; right half over pink watermark
+    for (y in 20..100) {
+      for (x in 40..130) {
+        if ((x + y) % 12 < 6) bmp.setPixel(x, y, greenWatermark)
+      }
+      for (x in 131..220) {
+        bmp.setPixel(x, y, pinkWatermark)
+      }
+    }
+    // Print crisp black text stroke across both watermarks
+    for (x in 60..200) {
+      for (y in 54..58) {
+        bmp.setPixel(x, y, blackInk)
+      }
+    }
+
+    val patch = BitmapPatchUtils.createCleanBackgroundPatch(
+      pageBmp = bmp,
+      leftNorm = 55f / 260f,
+      topNorm = 44f / 120f,
+      rightNorm = 205f / 260f,
+      bottomNorm = 68f / 120f,
+    )
+    assertTrue(patch != null)
+    val pb = patch!!.bitmap
+
+    // 1. Watermark band pixels outside the black stroke (e.g. y = 3 from top of patch) must remain TRANSPARENT (alpha == 0), never stamped white!
+    var untouchedWatermarkPx = 0
+    for (x in 4 until pb.width - 4) {
+      val topPx = pb.getPixel(x, 2)
+      assertTrue(
+        "Watermark/paper pixel at x=$x should stay transparent (alpha==0), not opaque white stamp",
+        Color.alpha(topPx) == 0,
+      )
+      untouchedWatermarkPx++
+    }
+    assertTrue(untouchedWatermarkPx > 20)
+
+    // 2. Erased black stroke pixels over pink watermark (right side) must reconstruct to pink hue, not plain white paper
+    val midInkX = (pb.width * 0.78f).toInt()
+    val midInkY = pb.height / 2
+    val reconstructedPink = pb.getPixel(midInkX, midInkY)
+    assertTrue(
+      "Expected erased ink over pink watermark to reconstruct near pink (${Color.red(reconstructedPink)},${Color.green(reconstructedPink)},${Color.blue(reconstructedPink)})",
+      Color.alpha(reconstructedPink) == 255 &&
+        Color.red(reconstructedPink) > Color.green(reconstructedPink) + 30 &&
+        Color.red(reconstructedPink) > 210,
+    )
+
     pb.recycle()
     bmp.recycle()
   }

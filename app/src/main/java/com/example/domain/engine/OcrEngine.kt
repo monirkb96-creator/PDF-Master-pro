@@ -196,11 +196,14 @@ class OcrEngine(
       }
     }
 
-    // 2. Run ML Kit Latin OCR for scanned English PDFs or English image sections
-    val mlKitBlocks = runCatching { detectBlocksWithMlKit(bitmap, pageIndex, safePageH) }
-      .getOrDefault(emptyList())
-    for (blk in mlKitBlocks) {
-      if (!overlapsAny(blk, merged)) merged.add(blk)
+    // 2. Run ML Kit Latin OCR only on pure scanned/image PDFs where no vector text exists,
+    // so Bangla graphic curves in hybrid PDFs aren't polluted by Latin OCR noise.
+    if (existingVectorBlocks.isEmpty()) {
+      val mlKitBlocks = runCatching { detectBlocksWithMlKit(bitmap, pageIndex, safePageH) }
+        .getOrDefault(emptyList())
+      for (blk in mlKitBlocks) {
+        if (!overlapsAny(blk, merged)) merged.add(blk)
+      }
     }
 
     // 3. Offline visual dark-ink line/phrase detector for Bangla vector curves, image glyphs, or mixed forms
@@ -232,7 +235,7 @@ class OcrEngine(
             for (line in block.lines) {
               val text = line.text.trim()
               val rect = line.boundingBox ?: continue
-              if (text.isEmpty() || rect.width() <= 2 || rect.height() <= 2) continue
+              if (text.count { it.isLetterOrDigit() } < 2 || rect.width() <= 2 || rect.height() <= 2) continue
               val leftNorm = (rect.left / bw).coerceIn(0f, 0.98f)
               val topNorm = (rect.top / bh).coerceIn(0f, 0.98f)
               val rightNorm = (rect.right / bw).coerceIn(leftNorm + 0.015f, 1f)
