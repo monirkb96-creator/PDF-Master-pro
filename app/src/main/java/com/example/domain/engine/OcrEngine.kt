@@ -210,7 +210,24 @@ class OcrEngine(
     val visualBlocks = runCatching { BitmapPatchUtils.detectVisualTextLines(bitmap, pageIndex, safePageH) }
       .getOrDefault(emptyList())
     for (blk in visualBlocks) {
-      if (!overlapsAny(blk, merged)) merged.add(blk)
+      if (!overlapsAny(blk, merged)) {
+        val calibrated = if (existingVectorBlocks.isNotEmpty()) {
+          val blkCy = (blk.topNorm + blk.bottomNorm) * 0.5f
+          val rowPeer = existingVectorBlocks
+            .filter { vec ->
+              val vecCy = (vec.topNorm + vec.bottomNorm) * 0.5f
+              kotlin.math.abs(vecCy - blkCy) < 0.012f &&
+                vec.fontSizePt in (blk.fontSizePt * 0.65f)..(blk.fontSizePt * 1.45f)
+            }
+            .minByOrNull { vec ->
+              kotlin.math.abs((vec.topNorm + vec.bottomNorm) * 0.5f - blkCy)
+            }
+          if (rowPeer != null) blk.copy(fontSizePt = rowPeer.fontSizePt) else blk
+        } else {
+          blk
+        }
+        merged.add(calibrated)
+      }
     }
 
     merged

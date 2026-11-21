@@ -124,6 +124,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -133,6 +134,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.TextUnit
@@ -508,7 +510,22 @@ fun PdfEditorScreen(
           hitBlock.bottomNorm,
         )
         val lum = (0.299f * sampledBg.red + 0.587f * sampledBg.green + 0.114f * sampledBg.blue)
-        val defaultInk = if (lum < 0.45f) Color.White else selectedColor
+        val sampledInkArgb = if (lum >= 0.45f) {
+          BitmapPatchUtils.sampleDominantInkColor(
+            currentRenderedBmp,
+            hitBlock.leftNorm,
+            hitBlock.topNorm,
+            hitBlock.rightNorm,
+            hitBlock.bottomNorm,
+          )
+        } else {
+          null
+        }
+        val defaultInk = when {
+          lum < 0.45f -> Color.White
+          sampledInkArgb != null -> Color(sampledInkArgb)
+          else -> selectedColor
+        }
         val detectedFont = when {
           text.isEmpty() || text.any { it.code > 126 } -> {
             if (hitBlock.fontFamily == EditorFont.TIMES || hitBlock.fontFamily == EditorFont.BENGALI_SERIF) {
@@ -1088,6 +1105,11 @@ fun PdfEditorScreen(
                             fontFamily = composeFontFamily(act.font),
                             fontWeight = if (act.isBold) FontWeight.Bold else FontWeight.Normal,
                             fontStyle = if (act.isItalic) FontStyle.Italic else FontStyle.Normal,
+                            platformStyle = PlatformTextStyle(includeFontPadding = false),
+                            lineHeightStyle = LineHeightStyle(
+                              alignment = LineHeightStyle.Alignment.Proportional,
+                              trim = LineHeightStyle.Trim.Both,
+                            ),
                           )
                           val result = textMeasurer.measure(act.text, style)
                           drawText(result, topLeft = Offset(px, (py - result.size.height * 0.85f).coerceAtLeast(0f)))
@@ -1105,8 +1127,10 @@ fun PdfEditorScreen(
                           if (patch != null && !patch.bitmap.isRecycled) {
                             val pLeft = (patch.leftNorm * size.width).roundToInt()
                             val pTop = (patch.topNorm * size.height).roundToInt()
-                            val pW = ((patch.rightNorm - patch.leftNorm) * size.width).roundToInt().coerceAtLeast(4)
-                            val pH = ((patch.bottomNorm - patch.topNorm) * size.height).roundToInt().coerceAtLeast(4)
+                            val pRight = (patch.rightNorm * size.width).roundToInt()
+                            val pBottom = (patch.bottomNorm * size.height).roundToInt()
+                            val pW = (pRight - pLeft).coerceAtLeast(4)
+                            val pH = (pBottom - pTop).coerceAtLeast(4)
                             drawImage(
                               image = patch.bitmap.asImageBitmap(),
                               dstOffset = IntOffset(pLeft, pTop),
@@ -1129,9 +1153,15 @@ fun PdfEditorScreen(
                                 fontFamily = composeFontFamily(act.font),
                                 fontWeight = if (act.isBold) FontWeight.Bold else FontWeight.Normal,
                                 fontStyle = if (act.isItalic) FontStyle.Italic else FontStyle.Normal,
+                                platformStyle = PlatformTextStyle(includeFontPadding = false),
+                                lineHeightStyle = LineHeightStyle(
+                                  alignment = LineHeightStyle.Alignment.Proportional,
+                                  trim = LineHeightStyle.Trim.Both,
+                                ),
                               ),
                             )
-                            drawText(res, topLeft = Offset(l, t))
+                            val drawTop = (t + (h - res.size.height) * 0.5f).coerceAtLeast(0f)
+                            drawText(res, topLeft = Offset(l, drawTop))
                           }
                         }
                         is PdfEditAction.AddImage -> {
@@ -1197,8 +1227,10 @@ fun PdfEditorScreen(
                       if (patch != null && !patch.bitmap.isRecycled) {
                         val pLeft = (patch.leftNorm * size.width).roundToInt()
                         val pTop = (patch.topNorm * size.height).roundToInt()
-                        val pW = ((patch.rightNorm - patch.leftNorm) * size.width).roundToInt().coerceAtLeast(4)
-                        val pH = ((patch.bottomNorm - patch.topNorm) * size.height).roundToInt().coerceAtLeast(4)
+                        val pRight = (patch.rightNorm * size.width).roundToInt()
+                        val pBottom = (patch.bottomNorm * size.height).roundToInt()
+                        val pW = (pRight - pLeft).coerceAtLeast(4)
+                        val pH = (pBottom - pTop).coerceAtLeast(4)
                         drawImage(
                           image = patch.bitmap.asImageBitmap(),
                           dstOffset = IntOffset(pLeft, pTop),
@@ -1248,6 +1280,11 @@ fun PdfEditorScreen(
                           fontFamily = composeFontFamily(session.font),
                           fontWeight = if (session.isBold) FontWeight.Bold else FontWeight.Normal,
                           fontStyle = if (session.isItalic) FontStyle.Italic else FontStyle.Normal,
+                          platformStyle = PlatformTextStyle(includeFontPadding = false),
+                          lineHeightStyle = LineHeightStyle(
+                            alignment = LineHeightStyle.Alignment.Proportional,
+                            trim = LineHeightStyle.Trim.Both,
+                          ),
                         ),
                         cursorBrush = SolidColor(Color(0xFF155EEF)),
                         decorationBox = { innerTextField ->

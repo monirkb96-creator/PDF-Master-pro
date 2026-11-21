@@ -599,4 +599,91 @@ class PdfEngineRobolectricTest {
     pb.recycle()
     bmp.recycle()
   }
+
+  @Test
+  fun `clean background patch erases 2px anti-aliased gray and pink watermark halos with zero ghost`() {
+    val w = 900
+    val h = 160
+    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    bmp.eraseColor(Color.WHITE)
+
+    val pinkWatermark = Color.rgb(244, 184, 184)
+    val blackInk = Color.rgb(12, 12, 12)
+    val pinkHalo50 = Color.rgb(130, 98, 98)   // 1px from core over pink
+    val pinkHalo20 = Color.rgb(206, 152, 152) // 2px from core over pink (lum ~0.66)
+    val grayHalo20 = Color.rgb(212, 212, 212) // 2px from core over white paper (lum ~0.83)
+
+    // Right half has pink watermark background
+    for (y in 20 until 140) {
+      for (x in 450 until 850) {
+        bmp.setPixel(x, y, pinkWatermark)
+      }
+    }
+
+    // Left stroke over white paper with 2px gray halo
+    for (x in 150..300) {
+      for (y in 76..82) bmp.setPixel(x, y, blackInk)
+      bmp.setPixel(x, 74, grayHalo20)
+      bmp.setPixel(x, 75, grayHalo20)
+      bmp.setPixel(x, 83, grayHalo20)
+      bmp.setPixel(x, 84, grayHalo20)
+    }
+
+    // Right stroke over pink watermark with 2px darkened pink halo
+    for (x in 550..720) {
+      for (y in 76..82) bmp.setPixel(x, y, blackInk)
+      bmp.setPixel(x, 75, pinkHalo50)
+      bmp.setPixel(x, 83, pinkHalo50)
+      bmp.setPixel(x, 74, pinkHalo20)
+      bmp.setPixel(x, 84, pinkHalo20)
+    }
+
+    val leftPatch = BitmapPatchUtils.createCleanBackgroundPatch(
+      pageBmp = bmp,
+      leftNorm = 145f / w,
+      topNorm = 70f / h,
+      rightNorm = 305f / w,
+      bottomNorm = 88f / h,
+    )!!
+    val lp = leftPatch.bitmap
+    // Check EVERY pixel in left patch column x=75: zero gray halo (no pixel < 235 if opaque)
+    for (y in 0 until lp.height) {
+      val px = lp.getPixel(lp.width / 2, y)
+      assertTrue(
+        "Gray 2px halo leaked at y=$y: argb(${Color.alpha(px)},${Color.red(px)},${Color.green(px)},${Color.blue(px)})",
+        Color.alpha(px) == 0 || (Color.red(px) >= 235 && Color.green(px) >= 235 && Color.blue(px) >= 235),
+      )
+    }
+    lp.recycle()
+
+    val rightPatch = BitmapPatchUtils.createCleanBackgroundPatch(
+      pageBmp = bmp,
+      leftNorm = 545f / w,
+      topNorm = 70f / h,
+      rightNorm = 725f / w,
+      bottomNorm = 88f / h,
+    )!!
+    val rp = rightPatch.bitmap
+    // Check EVERY pixel in right patch column x=85: zero darkened pink halo (any opaque reconstructed pixel must match pure pink >= 225 red)
+    for (y in 0 until rp.height) {
+      val px = rp.getPixel(rp.width / 2, y)
+      assertTrue(
+        "Dark pink 2px halo leaked at y=$y: argb(${Color.alpha(px)},${Color.red(px)},${Color.green(px)},${Color.blue(px)})",
+        Color.alpha(px) == 0 || (Color.red(px) >= 225 && Color.red(px) > Color.green(px) + 30),
+      )
+    }
+    rp.recycle()
+
+    // Also verify dominant ink sampler detects blue signature color accurately
+    val blueBmp = Bitmap.createBitmap(120, 60, Bitmap.Config.ARGB_8888)
+    blueBmp.eraseColor(Color.WHITE)
+    val sigBlue = Color.rgb(18, 65, 200)
+    for (x in 20..100) for (y in 25..34) blueBmp.setPixel(x, y, sigBlue)
+    val sampled = BitmapPatchUtils.sampleDominantInkColor(blueBmp, 15f / 120f, 20f / 60f, 105f / 120f, 40f / 60f)
+    assertTrue("Expected non-null sampled blue ink", sampled != null)
+    assertTrue("Expected blue channel to dominate sampled signature ink", Color.blue(sampled!!) > Color.red(sampled) + 80)
+
+    blueBmp.recycle()
+    bmp.recycle()
+  }
 }

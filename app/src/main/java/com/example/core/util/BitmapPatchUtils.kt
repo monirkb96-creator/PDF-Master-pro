@@ -39,9 +39,9 @@ object BitmapPatchUtils {
     val t = min(topNorm, bottomNorm).coerceIn(0f, 0.99f)
     val b = max(topNorm, bottomNorm).coerceIn(t + 0.005f, 1f)
 
-    val padX = max(2, (bw * 0.003f).roundToInt())
-    val padY = max(2, (bh * 0.003f).roundToInt())
-    val ring = max(8, (bw * 0.006f).roundToInt()).coerceAtMost(14)
+    val padX = max(3, (bw * 0.0035f).roundToInt())
+    val padY = max(3, (bh * 0.0035f).roundToInt())
+    val ring = max(10, (bw * 0.007f).roundToInt()).coerceAtMost(16)
 
     val x0 = (l * bw).roundToInt().coerceIn(0, bw - 2)
     val x1 = (r * bw).roundToInt().coerceIn(x0 + 1, bw - 1)
@@ -125,6 +125,32 @@ object BitmapPatchUtils {
       }
     }
 
+    // Detect whether the local outer ring sits over a pastel watermark so colored halo checks stay safe
+    var ringWatermarkVotes = 0
+    var ringCleanVotes = 0
+    if (!isDarkPaper) {
+      for (y in 0 until ch) {
+        for (x in 0 until cw) {
+          if (y !in innerStartY..innerEndY || x !in innerStartX..innerEndX) {
+            val idx = y * cw + x
+            if (lums[idx] >= 0.66f) {
+              ringCleanVotes++
+              val px = pixels[idx]
+              val r = Color.red(px)
+              val g = Color.green(px)
+              val b = Color.blue(px)
+              val minCh = min(r, min(g, b))
+              val chroma = max(r, max(g, b)) - minCh
+              if (minCh <= 215 && chroma >= 22) {
+                ringWatermarkVotes++
+              }
+            }
+          }
+        }
+      }
+    }
+    val ringHasWatermark = ringCleanVotes > 0 && ringWatermarkVotes >= max(6, ringCleanVotes / 10)
+
     // Step 1: Identify genuine CORE ink pixels across the entire context window.
     // Never match pastel watermarks (e.g. light green #A8D5BA or pastel pink #F4B8B8).
     val coreMask = BooleanArray(cw * ch)
@@ -140,9 +166,9 @@ object BitmapPatchUtils {
         val maxCh = max(r, max(g, b))
         val chroma = maxCh - minCh
         val isCoreInk = if (!isDarkPaper) {
-          lum < 0.52f || (lum < 0.64f && minCh < 95 && chroma > 45)
+          lum < 0.60f || (lum < 0.70f && minCh < 115)
         } else {
-          lum > (ringMedianLum + 0.18f) && lum > 0.58f
+          lum > (ringMedianLum + 0.16f) && lum > 0.56f
         }
         if (isCoreInk) {
           coreMask[idx] = true
@@ -150,17 +176,18 @@ object BitmapPatchUtils {
       }
     }
 
-    // Step 2: Expand coreMask by 1px for anti-aliased edge, plus 2nd-px ONLY for neutral gray halos on high-res bitmaps.
-    // Also exclude 1px around outer-ring ink from background sampling so neighbor borders never smudge in.
+    // Step 2: Hysteresis expansion around coreMask so 100% of anti-aliased gray and watermark-blended
+    // stroke halos vanish with zero leftover ghost outline ("ছাপ"), while clean watermarks stay untouched.
+    // Also exclude all erased pixels & outer-ring halos from sampling so neighbor borders never smudge in.
     val erasedMask = BooleanArray(cw * ch)
     val sampleExcludeMask = coreMask.copyOf()
-    val useTwoPxHalo = bw >= 800 && !isDarkPaper
+    val haloRadius = if (!isDarkPaper && bw >= 800) 2 else 1
     for (y in 0 until ch) {
       for (x in 0 until cw) {
         val idx = y * cw + x
         if (!coreMask[idx]) continue
         val inInner = x in innerStartX..innerEndX && y in innerStartY..innerEndY
-        val rad = if (inInner && useTwoPxHalo) 2 else 1
+        val rad = if (inInner) haloRadius else 1
         for (dy in -rad..rad) {
           for (dx in -rad..rad) {
             val nx = x + dx
@@ -168,20 +195,29 @@ object BitmapPatchUtils {
             if (nx !in 0 until cw || ny !in 0 until ch) continue
             val nIdx = ny * cw + nx
             val distMax = max(abs(dx), abs(dy))
+            val nInInner = nx in innerStartX..innerEndX && ny in innerStartY..innerEndY
             if (distMax <= 1) {
               sampleExcludeMask[nIdx] = true
-              if (nx in innerStartX..innerEndX && ny in innerStartY..innerEndY) {
+              if (nInInner) {
                 erasedMask[nIdx] = true
               }
-            } else if (nx in innerStartX..innerEndX && ny in innerStartY..innerEndY) {
+            } else if (!isDarkPaper) {
               val nPx = pixels[nIdx]
               val nr = Color.red(nPx)
               val ng = Color.green(nPx)
               val nb = Color.blue(nPx)
               val nChroma = max(nr, max(ng, nb)) - min(nr, min(ng, nb))
-              if (lums[nIdx] < 0.78f && nChroma < 28) {
-                erasedMask[nIdx] = true
+              val nLum = lums[nIdx]
+              val isHalo = if (!ringHasWatermark) {
+                nLum < 0.90f
+              } else {
+                (nLum < 0.90f && nChroma < 24) || nLum < 0.73f
+              }
+              if (isHalo) {
                 sampleExcludeMask[nIdx] = true
+                if (nInInner) {
+                  erasedMask[nIdx] = true
+                }
               }
             }
           }
@@ -324,7 +360,7 @@ object BitmapPatchUtils {
         val sx = (gx * step).coerceIn(0, bw - 1)
         val px = rowBuf[sx]
         val lum = (0.299f * Color.red(px) + 0.587f * Color.green(px) + 0.114f * Color.blue(px)) / 255f
-        if (lum < 0.48f) {
+        if (lum < 0.54f) {
           darkGrid[rowOffset + gx] = true
           cnt++
         }
@@ -480,7 +516,7 @@ object BitmapPatchUtils {
         val bottomNorm = (((segY1 + 1) * step + 2).coerceAtMost(bh).toFloat() / bh).coerceIn(topNorm + 0.008f, 1f)
         val maxPt = (pageHeightPt * 0.08f).coerceAtLeast(48f)
         val tightInkHeightNorm = (coreSegH * step).toFloat() / bh.coerceAtLeast(1)
-        val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.15f).coerceIn(7f, maxPt)
+        val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.42f).coerceIn(7f, maxPt)
         val isBoldGuess = fillRatio >= 0.42f
 
         blocks.add(
@@ -521,7 +557,7 @@ object BitmapPatchUtils {
     fun isDarkPixel(x: Int, y: Int): Boolean {
       val px = pageBmp.getPixel(x, y)
       val lum = (0.299f * Color.red(px) + 0.587f * Color.green(px) + 0.114f * Color.blue(px)) / 255f
-      return lum < 0.48f
+      return lum < 0.54f
     }
 
     // Search a small radius around tap point for dark ink
@@ -629,7 +665,7 @@ object BitmapPatchUtils {
     val bottomNorm = ((yBot + 4).coerceAtMost(bh).toFloat() / bh).coerceIn(topNorm + 0.008f, 1f)
     val tightInkHeightNorm = lineH.toFloat() / bh.coerceAtLeast(1)
     val maxPt = (pageHeightPt * 0.08f).coerceAtLeast(48f)
-    val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.10f).coerceIn(7f, maxPt)
+    val estFontPt = (tightInkHeightNorm * pageHeightPt.coerceAtLeast(200f) * 1.28f).coerceIn(7f, maxPt)
 
     return PdfTextBlock(
       id = "tap_ink_${pageIndex}_${cx}_${cy}",
@@ -640,6 +676,64 @@ object BitmapPatchUtils {
       rightNorm = rightNorm,
       bottomNorm = bottomNorm,
       fontSizePt = estFontPt,
+    )
+  }
+
+  /**
+   * Samples the dominant ink color (e.g. black, dark charcoal, blue signature ink, or red)
+   * inside the normalized box so edited text naturally inherits the original document's ink color.
+   */
+  fun sampleDominantInkColor(
+    pageBmp: Bitmap?,
+    leftNorm: Float,
+    topNorm: Float,
+    rightNorm: Float,
+    bottomNorm: Float,
+  ): Int? {
+    if (pageBmp == null || pageBmp.width < 16 || pageBmp.height < 16) return null
+    val bw = pageBmp.width
+    val bh = pageBmp.height
+    val x0 = (min(leftNorm, rightNorm) * bw).roundToInt().coerceIn(0, bw - 2)
+    val x1 = (max(leftNorm, rightNorm) * bw).roundToInt().coerceIn(x0 + 1, bw - 1)
+    val y0 = (min(topNorm, bottomNorm) * bh).roundToInt().coerceIn(0, bh - 2)
+    val y1 = (max(topNorm, bottomNorm) * bh).roundToInt().coerceIn(y0 + 1, bh - 1)
+
+    val w = x1 - x0 + 1
+    val h = y1 - y0 + 1
+    if (w <= 0 || h <= 0) return null
+    val buf = IntArray(w * h)
+    pageBmp.getPixels(buf, 0, w, x0, y0, w, h)
+
+    val darkSamples = mutableListOf<Int>()
+    for (px in buf) {
+      val r = Color.red(px)
+      val g = Color.green(px)
+      val b = Color.blue(px)
+      val lum = (0.299f * r + 0.587f * g + 0.114f * b) / 255f
+      if (lum < 0.48f) {
+        darkSamples.add(px)
+      }
+    }
+    if (darkSamples.isEmpty()) return null
+
+    // Pick the darkest 35% of ink pixels (core stroke centers, avoiding anti-aliased gray edges)
+    val sorted = darkSamples.sortedBy { px ->
+      0.299f * Color.red(px) + 0.587f * Color.green(px) + 0.114f * Color.blue(px)
+    }
+    val coreLimit = max(1, (sorted.size * 0.35f).roundToInt())
+    var sumR = 0L
+    var sumG = 0L
+    var sumB = 0L
+    for (i in 0 until coreLimit) {
+      val px = sorted[i]
+      sumR += Color.red(px)
+      sumG += Color.green(px)
+      sumB += Color.blue(px)
+    }
+    return Color.rgb(
+      (sumR / coreLimit).toInt().coerceIn(0, 255),
+      (sumG / coreLimit).toInt().coerceIn(0, 255),
+      (sumB / coreLimit).toInt().coerceIn(0, 255),
     )
   }
 }

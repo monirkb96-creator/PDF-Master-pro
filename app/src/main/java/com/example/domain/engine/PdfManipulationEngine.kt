@@ -400,9 +400,13 @@ class PdfManipulationEngine(private val context: Context) {
                       val lines = action.replacementText.replace("\r", "").split('\n')
                       val lineStep = (action.fontSizeSp * 1.25f).coerceAtLeast(10f)
                       val firstBaselineY = if (lines.size <= 1) {
-                        bottom + (boxH * 0.22f)
+                        val baselineByTop = top - action.fontSizeSp * 0.84f
+                        baselineByTop.coerceIn(
+                          bottom + action.fontSizeSp * 0.08f,
+                          (top - action.fontSizeSp * 0.64f).coerceAtLeast(bottom + action.fontSizeSp * 0.08f),
+                        )
                       } else {
-                        (top - action.fontSizeSp * 0.92f).coerceAtLeast(bottom + lineStep * (lines.size - 1))
+                        (top - action.fontSizeSp * 0.88f).coerceAtLeast(bottom + lineStep * (lines.size - 1))
                       }
                       lines.forEachIndexed { idx, line ->
                         if (line.isBlank()) return@forEachIndexed
@@ -1132,7 +1136,7 @@ class PdfManipulationEngine(private val context: Context) {
     isBold: Boolean = false,
     isItalic: Boolean = false,
   ) {
-    val scale = 3f
+    val scale = 5f
     val baseTypeface = when (fontChoice) {
       EditorFont.TIMES, EditorFont.BENGALI_SERIF -> android.graphics.Typeface.SERIF
       EditorFont.COURIER -> android.graphics.Typeface.MONOSPACE
@@ -1143,24 +1147,27 @@ class PdfManipulationEngine(private val context: Context) {
     }
     val tfStyle = (if (isBold) android.graphics.Typeface.BOLD else 0) or
       (if (isItalic) android.graphics.Typeface.ITALIC else 0)
-    val paint = android.text.TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+    val resolvedTypeface = android.graphics.Typeface.create(baseTypeface, tfStyle)
+    val paint = android.text.TextPaint(
+      Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+    ).apply {
       color = colorArgb
       textSize = fontSizePt * scale
-      typeface = android.graphics.Typeface.create(baseTypeface, tfStyle)
-      if (isBold) isFakeBoldText = true
+      typeface = resolvedTypeface
+      if (isBold && !resolvedTypeface.isBold) isFakeBoldText = true
       if (isItalic) textSkewX = -0.22f
     }
     val textW = paint.measureText(text).coerceAtLeast(12f)
     val fm = paint.fontMetrics
     val textH = (fm.descent - fm.ascent).coerceAtLeast(fontSizePt * scale)
-    val bmpW = (textW + 10f).toInt().coerceAtLeast(16)
-    val bmpH = (textH + 8f).toInt().coerceAtLeast(16)
+    val bmpW = (textW + 14f).toInt().coerceAtLeast(24)
+    val bmpH = (textH + 12f).toInt().coerceAtLeast(24)
     val bmp = Bitmap.createBitmap(bmpW, bmpH, Bitmap.Config.ARGB_8888)
     bmp.eraseColor(Color.TRANSPARENT)
     val canvas = Canvas(bmp)
-    canvas.drawText(text, 4f, -fm.ascent + 4f, paint)
+    canvas.drawText(text, 6f, -fm.ascent + 6f, paint)
     val pdImg = LosslessFactory.createFromImage(doc, bmp)
-    cs.drawImage(pdImg, pdfX, pdfY - (fm.descent + 4f) / scale, bmpW / scale, bmpH / scale)
+    cs.drawImage(pdImg, pdfX - 6f / scale, pdfY - (fm.descent + 6f) / scale, bmpW / scale, bmpH / scale)
     bmp.recycle()
   }
 
@@ -1353,11 +1360,8 @@ class PdfManipulationEngine(private val context: Context) {
             return
           }
 
-          val perGlyphHits = opPositions.map { tp ->
-            val ids = matchTargetsForPosition(tp)
-            matchedTargetIds.addAll(ids)
-            ids.isNotEmpty()
-          }
+          val perGlyphIds = opPositions.map { tp -> matchTargetsForPosition(tp) }
+          val perGlyphHits = perGlyphIds.map { it.isNotEmpty() }
           val hitCount = perGlyphHits.count { it }
 
           if (hitCount == 0) {
@@ -1367,6 +1371,7 @@ class PdfManipulationEngine(private val context: Context) {
           }
 
           if (hitCount == opPositions.size) {
+            perGlyphIds.forEach { matchedTargetIds.addAll(it) }
             buf.modified = true
             if (opName == "\"" && operands.size >= 2) {
               buf.tokens.add(operands[0])
@@ -1390,6 +1395,7 @@ class PdfManipulationEngine(private val context: Context) {
             val cosStr = operands[0] as COSString
             val arr = COSArray()
             if (splitCosStringIntoTjArray(cosStr, opPositions, perGlyphHits, tfs, tc, tw, arr)) {
+              perGlyphIds.forEach { matchedTargetIds.addAll(it) }
               buf.modified = true
               if (arr.size() > 0) {
                 buf.tokens.add(arr)
@@ -1432,6 +1438,7 @@ class PdfManipulationEngine(private val context: Context) {
               }
             }
             if (splitOk && posCursor == opPositions.size) {
+              perGlyphIds.forEach { matchedTargetIds.addAll(it) }
               buf.modified = true
               if (newArr.size() > 0) {
                 buf.tokens.add(newArr)
